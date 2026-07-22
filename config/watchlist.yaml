@@ -1,0 +1,10 @@
+# Small intraday watchlist for Phase 1 dry-runs.
+# Keep this short — the whole thesis is "small watchlist, rationed inference."
+tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+
+# How far back to pull daily bars for indicator warm-up (MACD/RSI need history
+# before their first value is meaningful).
+lookback_days: 90
