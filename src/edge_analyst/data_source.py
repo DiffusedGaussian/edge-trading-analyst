@@ -3,6 +3,7 @@ module out later for Alpaca (Phase 5, when we need real paper-broker fills)
 without touching anything downstream, since callers only see the DataFrame
 shape defined here.
 """
+
 from __future__ import annotations
 
 import pandas as pd

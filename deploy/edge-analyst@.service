@@ -1,0 +1,19 @@
+# Templated one-shot unit: `%i` is the environment name (staging / production).
+# Install once on the Jetson (see deploy/README.md), then the .timer drives cadence.
+# The pipeline is a batch job, not a daemon — Type=oneshot runs it and exits, so a
+# single git pull is all a deploy needs; there is no long-running process to restart.
+[Unit]
+Description=Edge Trading Analyst (%i) — one analysis cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Per-environment config (SQLite path, watchlist, thresholds) lives here so staging
+# and production share the same code but never the same data dir.
+EnvironmentFile=/etc/edge-analyst/%i.env
+WorkingDirectory=/opt/edge-trading-analyst
+# --frozen: install exactly uv.lock. --no-dev: ruff/pytest never touch the device.
+ExecStart=/usr/bin/env uv run --frozen --no-dev python -m edge_analyst.pipeline
+# Be a polite background citizen on an 8GB shared-memory box.
+Nice=10

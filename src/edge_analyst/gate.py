@@ -1,6 +1,7 @@
 """Phase 2 materiality gate. Deterministic only — no LLM. Decides whether a
 cycle's indicators justify spending an LLM call, or exit for free.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

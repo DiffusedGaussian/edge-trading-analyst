@@ -1,0 +1,36 @@
+# Optional but recommended: `uv run pre-commit install && uv run pre-commit install --hook-type pre-push`
+# ruff runs via `uv run --frozen` so the hook uses the exact version in uv.lock —
+# local and CI can never lint against different ruff releases.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check (lockfile-pinned)
+        language: system
+        entry: uv run --frozen ruff check --fix --force-exclude
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format (lockfile-pinned)
+        language: system
+        entry: uv run --frozen ruff format --force-exclude
+        types_or: [python, pyi]
+        require_serial: true
+      # Full test suite before a push (fast today; catches logic regressions CI would).
+      - id: pytest
+        name: pytest
+        language: system
+        entry: uv run --frozen pytest
+        pass_filenames: false
+        stages: [pre-push]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]

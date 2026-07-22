@@ -1,0 +1,16 @@
+# Drives the intraday cadence for edge-analyst@%i.service.
+# Tune OnCalendar to your market/timezone — the default is every 30 min on weekdays.
+# Set the box's timezone (`timedatectl set-timezone ...`) so this lines up with the
+# session you trade; systemd OnCalendar uses local time.
+[Unit]
+Description=Edge Trading Analyst (%i) — intraday cadence
+
+[Timer]
+OnCalendar=Mon-Fri *-*-* 09..17:00/30
+# If the Jetson was asleep/off when a tick was due, run once on wake rather than
+# firing every missed slot at once.
+Persistent=true
+Unit=edge-analyst@%i.service
+
+[Install]
+WantedBy=timers.target

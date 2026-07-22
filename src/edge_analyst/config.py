@@ -1,4 +1,5 @@
 """Load watchlist/config from YAML. Pure plumbing."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
