@@ -238,38 +238,3 @@ def run_trader(
         ticker, close, rsi_value, macd_hist, fired_reasons, state
     )
     return parse_trader_response(chat_completion(messages, base_url=base_url))
-
-
-if __name__ == "__main__":
-    import sys
-
-    from . import data_source
-    from .gate import gate
-    from .indicators import macd, rsi
-
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
-    news_text = sys.argv[2] if len(sys.argv) > 2 else "No major news today."
-    base_url = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:8080"
-
-    ohlcv = data_source.fetch_ohlcv(ticker, lookback_days=90)
-    macd_df = macd(ohlcv["close"])
-    rsi_series = rsi(ohlcv["close"])
-    gate_result = gate(ohlcv["close"], macd_df["histogram"], rsi_series)
-
-    close = ohlcv["close"].iloc[-1]
-    rsi_value = rsi_series.iloc[-1]
-    macd_hist = macd_df["histogram"].iloc[-1]
-
-    final_state = run_debate(
-        ticker, close, rsi_value, macd_hist, gate_result.reasons, news_text, base_url
-    )
-    print("=== DEBATE FINAL STATE ===")
-    print(f"Round {final_state.round}")
-    print(f"Bull: {final_state.bull}")
-    print(f"Bear: {final_state.bear}")
-
-    trader_decision = run_trader(
-        ticker, close, rsi_value, macd_hist, gate_result.reasons, final_state, base_url
-    )
-    print("\n=== TRADER DECISION ===")
-    print(trader_decision)
