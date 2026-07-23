@@ -3,9 +3,12 @@ name: CI
 # Runs on every PR into main. `pull_request` (not `pull_request_target`) so the
 # workflow definition is taken from the PR's own base — safe on a public repo,
 # since a fork's PR can't run privileged code against our secrets.
+# `edited` is included so the pr-title (conventional-commits) check re-runs when
+# the PR title changes — without it, a title fix never re-triggers CI.
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited]
 
 # A newer push to the same PR cancels the in-flight run — no point finishing stale checks.
 concurrency:
