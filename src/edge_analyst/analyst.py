@@ -3,6 +3,7 @@ already-computed deterministic indicators (never asks the model to recompute
 or recall financial math), and parses its reply forgivingly — sentinel
 key-value lines, not JSON, per TradingAgents' proven pattern for small models.
 """
+
 from __future__ import annotations
 
 import re
@@ -83,7 +84,9 @@ def parse_sentiment_response(text: str) -> SentimentSignal:
 
     rationale = _extract_field(text, "RATIONALE") or "no rationale parsed"
 
-    return SentimentSignal(label=label, score=score, confidence=confidence, rationale=rationale)
+    return SentimentSignal(
+        label=label, score=score, confidence=confidence, rationale=rationale
+    )
 
 
 if __name__ == "__main__":

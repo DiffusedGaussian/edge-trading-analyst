@@ -1,6 +1,7 @@
 """Direct HTTP client for llama-server's OpenAI-compatible endpoint. No agent
 framework in between — this keeps prompt shape and turn count fully under
 our control (see brief Section 5, tech-stack rationale)."""
+
 from __future__ import annotations
 
 import requests
