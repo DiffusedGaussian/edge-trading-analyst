@@ -27,3 +27,22 @@ def fetch_fundamentals(ticker: str) -> dict:
         "market_cap": info.get("marketCap"),
         "beta": info.get("beta"),
     }
+
+
+def fetch_news(ticker: str, max_items: int = 5) -> str:
+    """Recent news as a bounded, pre-summarized digest — title + yfinance's own
+    summary for the top `max_items` items, no full-article crawl. Bounding the
+    item count (and using the short `summary`, not the HTML `description`) keeps
+    the token cost of feeding this into the LLM predictable. yfinance news is
+    only loosely ticker-specific, so treat it as ambient context, not gospel.
+    Returns a sentinel string when nothing is available."""
+    items = yf.Ticker(ticker).news or []
+    lines = []
+    for item in items[:max_items]:
+        content = item.get("content", {})
+        title = (content.get("title") or "").strip()
+        summary = (content.get("summary") or "").strip()
+        if not title:
+            continue
+        lines.append(f"- {title}: {summary}" if summary else f"- {title}")
+    return "\n".join(lines) if lines else "No recent news available."

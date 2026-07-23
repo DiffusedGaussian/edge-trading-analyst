@@ -43,7 +43,11 @@ def run_cycle(
     lookback_days: int,
     news_text: str | None = None,
     base_url: str | None = None,
+    force: bool = False,
 ) -> CycleResult:
+    """`force=True` runs the LLM cascade even on a quiet gate — for
+    testing/demoing the full chain on a day nothing triggers. The real gate
+    result is still recorded on the snapshot; force only bypasses the early exit."""
     snapshot = analyze_ticker(ticker, lookback_days)
     if not snapshot.has_data:
         return CycleResult(snapshot=snapshot)
@@ -53,13 +57,16 @@ def run_cycle(
     store.save_fundamentals(conn, ticker, dt.date.today().isoformat(), fundamentals)
 
     # Gate is the cost lever: no material change -> exit before any LLM call.
-    if not snapshot.gate_result.material:
+    if not snapshot.gate_result.material and not force:
         return CycleResult(snapshot=snapshot)
 
-    # Material, but batch runs have no per-ticker news source / endpoint yet;
-    # can't reason without those, so stop at the (persisted) deterministic result.
-    if news_text is None or base_url is None:
+    # Material change. Reasoning needs a model endpoint; batch runs pass none,
+    # so they stop at the (persisted) deterministic result. Given an endpoint,
+    # fetch news automatically unless the caller supplied it (e.g. for testing).
+    if base_url is None:
         return CycleResult(snapshot=snapshot)
+    if news_text is None:
+        news_text = data_source.fetch_news(ticker)
 
     reasons = snapshot.gate_result.reasons
     analyst_messages = build_sentiment_prompt(
@@ -129,15 +136,19 @@ def _print_cycle(ticker: str, result: CycleResult) -> None:
 if __name__ == "__main__":
     import sys
 
-    # No args -> batch watchlist (deterministic only).
-    # TICKER "news" [base_url] -> single ticker with the full LLM cascade.
-    if len(sys.argv) > 1:
-        ticker = sys.argv[1]
-        news_text = sys.argv[2] if len(sys.argv) > 2 else "No major news today."
-        base_url = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:8080"
+    # No args -> batch watchlist (deterministic only, no news source).
+    # TICKER [base_url] [--force] -> single ticker, full live cascade with
+    #   auto-fetched news. --force runs the cascade even on a quiet gate.
+    args = [a for a in sys.argv[1:] if a != "--force"]
+    force = "--force" in sys.argv
+    if args:
+        ticker = args[0]
+        base_url = args[1] if len(args) > 1 else "http://localhost:8080"
         config = load_config()
         conn = store.get_connection()
-        result = run_cycle(conn, ticker, config.lookback_days, news_text, base_url)
+        result = run_cycle(
+            conn, ticker, config.lookback_days, base_url=base_url, force=force
+        )
         conn.close()
         _print_cycle(ticker, result)
     else:
