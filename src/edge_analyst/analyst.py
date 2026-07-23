@@ -24,7 +24,7 @@ Example:
 LABEL: bullish
 SCORE: 7
 CONFIDENCE: high
-RATIONALE: RSI just crossed above 70 alongside a positive earnings headline, confirming strong momentum."""
+RATIONALE: RSI crossed above 70 alongside a positive earnings headline."""
 
 
 def build_sentiment_prompt(
