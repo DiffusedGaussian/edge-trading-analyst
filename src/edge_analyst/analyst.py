@@ -6,8 +6,9 @@ key-value lines, not JSON, per TradingAgents' proven pattern for small models.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+
+from .llm_parsing import extract_field
 
 _SYSTEM_PROMPT = """You are a market sentiment analyst. You are given real, \
 already-computed technical indicators for a stock and a news item. Treat the \
@@ -59,30 +60,25 @@ _LABELS = {"bullish", "bearish", "neutral"}
 _CONFIDENCES = {"low", "medium", "high"}
 
 
-def _extract_field(text: str, field: str) -> str | None:
-    match = re.search(rf"^\s*{field}:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
-    return match.group(1).strip() if match else None
-
-
 def parse_sentiment_response(text: str) -> SentimentSignal:
     """Forgiving line-scan parser: finds each labeled field anywhere in the
     text (tolerant of preambles/markdown fences around it), and falls back
     to a safe default per-field rather than raising on any single miss."""
-    label = (_extract_field(text, "LABEL") or "").lower()
+    label = (extract_field(text, "LABEL") or "").lower()
     if label not in _LABELS:
         label = "neutral"
 
-    confidence = (_extract_field(text, "CONFIDENCE") or "").lower()
+    confidence = (extract_field(text, "CONFIDENCE") or "").lower()
     if confidence not in _CONFIDENCES:
         confidence = "low"
 
-    score_raw = _extract_field(text, "SCORE")
+    score_raw = extract_field(text, "SCORE")
     try:
         score = max(0.0, min(10.0, float(score_raw)))
     except (TypeError, ValueError):
         score = 5.0
 
-    rationale = _extract_field(text, "RATIONALE") or "no rationale parsed"
+    rationale = extract_field(text, "RATIONALE") or "no rationale parsed"
 
     return SentimentSignal(
         label=label, score=score, confidence=confidence, rationale=rationale
