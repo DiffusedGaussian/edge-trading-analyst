@@ -1,5 +1,6 @@
 """Phase 1 pipeline: data -> indicators -> persist. No LLM. Wires together
 data_source.py (infra), indicators.py (core), store.py (infra)."""
+
 from __future__ import annotations
 
 import datetime as dt

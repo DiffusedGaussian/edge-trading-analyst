@@ -1,0 +1,82 @@
+name: CI
+
+# Runs on every PR into main. `pull_request` (not `pull_request_target`) so the
+# workflow definition is taken from the PR's own base — safe on a public repo,
+# since a fork's PR can't run privileged code against our secrets.
+on:
+  pull_request:
+    branches: [main]
+
+# A newer push to the same PR cancels the in-flight run — no point finishing stale checks.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality (lint + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-uv restores its own cache keyed on uv.lock, so syncs are near-instant
+      # on unchanged deps. uv resolves and pins Python 3.12 itself from requires-python.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --frozen fails loudly if uv.lock is stale vs pyproject.toml — the same
+      # guarantee the Jetson relies on, so CI and the device install identical deps.
+      - name: Install dependencies
+        run: uv sync --frozen --dev
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Run tests
+        run: uv run pytest
+
+  pr-title:
+    name: pr-title (conventional commits)
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            chore
+            ci
+            revert
+
+  # Single stable check to point branch protection at. Keeps the required-check
+  # name constant even if the jobs above are renamed or split later.
+  ci-ok:
+    name: ci-ok
+    needs: [quality, pr-title]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify upstream jobs passed
+        run: |
+          for r in "quality:${{ needs.quality.result }}" "pr-title:${{ needs.pr-title.result }}"; do
+            name="${r%%:*}"; result="${r#*:}"
+            echo "${name}: ${result}"
+            [ "$result" = "success" ] || { echo "::error::${name} did not pass (${result})"; exit 1; }
+          done
+          echo "All CI gates passed."

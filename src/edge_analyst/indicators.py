@@ -1,4 +1,5 @@
 """Deterministic technical indicators. No LLM anywhere in this file."""
+
 from __future__ import annotations
 
 import pandas as pd
