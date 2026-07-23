@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .indicators import format_market_context
 from .llm_parsing import extract_field
 
 _STANCES = {"buy", "hold", "sell"}
@@ -49,12 +50,8 @@ def build_debate_prompt(
     opposing_key_point: str | None,
 ) -> list[dict]:
     system_prompt = _BULL_SYSTEM_PROMPT if persona == "bull" else _BEAR_SYSTEM_PROMPT
-    user_prompt = f"""Ticker: {ticker}
-Current close: ${close:.2f}
-RSI: {rsi_value:.1f}
-MACD histogram: {macd_hist:.3f}
-Triggered rules: {", ".join(fired_reasons) if fired_reasons else "none"}
-News: {news_text}"""
+    context = format_market_context(ticker, close, rsi_value, macd_hist, fired_reasons)
+    user_prompt = f"{context}\nNews: {news_text}"
     if opposing_key_point:
         opponent = "Bear" if persona == "bull" else "Bull"
         user_prompt += f"\n{opponent}'s current strongest point: {opposing_key_point}"
@@ -177,13 +174,13 @@ def build_trader_prompt(
     fired_reasons: list[str],
     state: DebateState,
 ) -> list[dict]:
-    user_prompt = f"""Ticker: {ticker}
-Current close: ${close:.2f}
-RSI: {rsi_value:.1f}
-MACD histogram: {macd_hist:.3f}
-Triggered rules: {", ".join(fired_reasons) if fired_reasons else "none"}
-Bull: {state.bull.stance} ({state.bull.confidence}) — {state.bull.key_point}
-Bear: {state.bear.stance} ({state.bear.confidence}) — {state.bear.key_point}"""
+    context = format_market_context(ticker, close, rsi_value, macd_hist, fired_reasons)
+    bull, bear = state.bull, state.bear
+    user_prompt = (
+        f"{context}\n"
+        f"Bull: {bull.stance} ({bull.confidence}) — {bull.key_point}\n"
+        f"Bear: {bear.stance} ({bear.confidence}) — {bear.key_point}"
+    )
     return [
         {"role": "system", "content": _TRADER_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .indicators import format_market_context
 from .llm_parsing import extract_field
 
 _SYSTEM_PROMPT = """You are a market sentiment analyst. You are given real, \
@@ -36,12 +37,8 @@ def build_sentiment_prompt(
     fired_reasons: list[str],
     news_text: str,
 ) -> list[dict]:
-    user_prompt = f"""Ticker: {ticker}
-Current close: ${close:.2f}
-RSI: {rsi_value:.1f}
-MACD histogram: {macd_hist:.3f}
-Triggered rules: {", ".join(fired_reasons) if fired_reasons else "none"}
-News: {news_text}"""
+    context = format_market_context(ticker, close, rsi_value, macd_hist, fired_reasons)
+    user_prompt = f"{context}\nNews: {news_text}"
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
