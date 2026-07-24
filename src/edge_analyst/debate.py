@@ -69,7 +69,7 @@ class DebateTurn:
 
 
 def parse_debate_response(text: str) -> DebateTurn:
-    """Same forgiving line-scan pattern as analyst.py — hard defaults on any
+    """Same forgiving line-scan pattern as news_analyst.py — hard defaults on any
     parse miss (Hold/low/placeholder), never raises."""
     stance = (extract_field(text, "STANCE") or "").lower()
     if stance not in _STANCES:
@@ -107,11 +107,15 @@ def run_debate(
     news_text: str,
     base_url: str,
     max_rounds: int = 2,
-) -> DebateState:
+) -> tuple[DebateState, list[DebateState]]:
+    """Returns (final_state, history) — history has one entry per round
+    actually run, so callers can persist the full debate, not just the
+    outcome (storage is free, unlike the LLM tokens spent producing it)."""
     from .llm_client import chat_completion
 
     bear_key_point = None
     state = None
+    history: list[DebateState] = []
     for round_num in range(1, max_rounds + 1):
         bull_messages = build_debate_prompt(
             "bull",
@@ -142,12 +146,13 @@ def run_debate(
         )
 
         state = DebateState(round=round_num, bull=bull_turn, bear=bear_turn)
+        history.append(state)
         bear_key_point = bear_turn.key_point
 
         if round_num == max_rounds or not should_continue_debate(state):
             break
 
-    return state
+    return state, history
 
 
 _ACTIONS = {"buy", "hold", "sell"}

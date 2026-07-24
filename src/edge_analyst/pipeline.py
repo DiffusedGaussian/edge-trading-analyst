@@ -14,17 +14,15 @@ import datetime as dt
 from dataclasses import dataclass
 
 from . import data_source, store
-from .analysis import TickerSnapshot, analyze_ticker
-from .analyst import build_sentiment_prompt, parse_sentiment_response
 from .config import Config, load_config
-from .debate import (
-    DebateState,
-    TraderDecision,
-    build_trader_prompt,
-    parse_trader_response,
-    run_debate,
-)
+from .debate import DebateState, TraderDecision, run_debate, run_trader
 from .llm_client import chat_completion
+from .news_analyst import (
+    SentimentSignal,
+    build_sentiment_prompt,
+    parse_sentiment_response,
+)
+from .snapshot import TickerSnapshot, analyze_ticker
 
 
 @dataclass
@@ -32,8 +30,9 @@ class CycleResult:
     snapshot: TickerSnapshot
     # The cascade fields stay None when the gate is quiet, or when the gate
     # is material but no news / model endpoint was supplied (batch runs).
-    sentiment: object | None = None
+    sentiment: SentimentSignal | None = None
     debate: DebateState | None = None
+    debate_history: list[DebateState] | None = None
     trader: TraderDecision | None = None
 
 
@@ -79,7 +78,7 @@ def run_cycle(
     # NOTE: how the debate should consume large/multi-article news vs. the
     # analyst's distilled summary is an open design decision (not resolved).
     # For now the debate keeps taking the raw news_text, as originally built.
-    debate = run_debate(
+    debate, debate_history = run_debate(
         ticker,
         snapshot.close,
         snapshot.rsi,
@@ -89,13 +88,31 @@ def run_cycle(
         base_url,
     )
 
-    trader_messages = build_trader_prompt(
-        ticker, snapshot.close, snapshot.rsi, snapshot.macd_hist, reasons, debate
+    trader = run_trader(
+        ticker,
+        snapshot.close,
+        snapshot.rsi,
+        snapshot.macd_hist,
+        reasons,
+        debate,
+        base_url,
     )
-    trader = parse_trader_response(chat_completion(trader_messages, base_url=base_url))
+
+    # Finer-grained than fundamentals' date-only as_of: a --force demo run can
+    # fire more than once a day for the same ticker, and date-only would
+    # silently overwrite the earlier decision instead of recording both.
+    as_of = dt.datetime.now().isoformat(timespec="seconds")
+    store.save_decision(
+        conn, ticker, as_of, snapshot.gate_result, news_text, sentiment, trader
+    )
+    store.save_debate_turns(conn, ticker, as_of, debate_history)
 
     return CycleResult(
-        snapshot=snapshot, sentiment=sentiment, debate=debate, trader=trader
+        snapshot=snapshot,
+        sentiment=sentiment,
+        debate=debate,
+        debate_history=debate_history,
+        trader=trader,
     )
 
 
