@@ -67,3 +67,47 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def interpret_rsi(value: float, low: float = 30, high: float = 70) -> str:
+    """Deterministic label for an RSI value, using the same 30/70 bands the
+    gate fires on. Handed to the LLM alongside the raw number so a small model
+    doesn't have to make the numeric judgment it's unreliable at (e.g. calling
+    a neutral 55 "bearish")."""
+    if value < low:
+        return "oversold"
+    if value > high:
+        return "overbought"
+    return "neutral"
+
+
+def interpret_macd_hist(value: float) -> str:
+    """Deterministic label for the MACD histogram. Its sign *is* the meaning:
+    positive = fast EMA above signal = bullish momentum, negative = bearish.
+    Prevents the small model from mislabeling a positive histogram as bearish."""
+    if value > 0:
+        return "bullish momentum"
+    if value < 0:
+        return "bearish momentum"
+    return "flat"
+
+
+def format_market_context(
+    ticker: str,
+    close: float,
+    rsi_value: float,
+    macd_hist: float,
+    fired_reasons: list[str],
+) -> str:
+    """The shared indicator block for every agent prompt (analyst, debate,
+    trader). Each raw number carries its deterministic interpretation so the
+    model only does language synthesis, never the numeric judgment. One home
+    for this so the three prompts can't drift apart."""
+    reasons = ", ".join(fired_reasons) if fired_reasons else "none"
+    return (
+        f"Ticker: {ticker}\n"
+        f"Current close: ${close:.2f}\n"
+        f"RSI: {rsi_value:.1f} ({interpret_rsi(rsi_value)})\n"
+        f"MACD histogram: {macd_hist:.3f} ({interpret_macd_hist(macd_hist)})\n"
+        f"Triggered rules: {reasons}"
+    )

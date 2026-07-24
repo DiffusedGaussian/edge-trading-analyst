@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from edge_analyst.indicators import ema, macd, rsi, sma
+from edge_analyst.indicators import (
+    ema,
+    interpret_macd_hist,
+    interpret_rsi,
+    macd,
+    rsi,
+    sma,
+)
 
 
 def test_sma_hard_cutoff_and_nan_warmup():
@@ -54,3 +61,20 @@ def test_macd_histogram_sign_tracks_momentum():
     # histogram is exactly macd - signal by construction.
     last = df.iloc[-1]
     assert last["histogram"] == last["macd"] - last["signal"]
+
+
+def test_interpret_rsi_uses_gate_bands():
+    assert interpret_rsi(25) == "oversold"
+    assert interpret_rsi(75) == "overbought"
+    # Boundaries are inclusive of "neutral" (not < low / not > high).
+    assert interpret_rsi(30) == "neutral"
+    assert interpret_rsi(70) == "neutral"
+    # The exact value the live model wrongly called "bearish".
+    assert interpret_rsi(55.1) == "neutral"
+
+
+def test_interpret_macd_hist_is_sign_based():
+    assert interpret_macd_hist(-0.5) == "bearish momentum"
+    assert interpret_macd_hist(0.0) == "flat"
+    # The exact positive value the live model wrongly called "bearish".
+    assert interpret_macd_hist(1.002) == "bullish momentum"

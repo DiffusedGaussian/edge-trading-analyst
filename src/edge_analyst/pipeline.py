@@ -14,17 +14,15 @@ import datetime as dt
 from dataclasses import dataclass
 
 from . import data_source, store
-from .analysis import TickerSnapshot, analyze_ticker
-from .analyst import build_sentiment_prompt, parse_sentiment_response
 from .config import Config, load_config
-from .debate import (
-    DebateState,
-    TraderDecision,
-    build_trader_prompt,
-    parse_trader_response,
-    run_debate,
-)
+from .debate import DebateState, TraderDecision, run_debate, run_trader
 from .llm_client import chat_completion
+from .news_analyst import (
+    SentimentSignal,
+    build_sentiment_prompt,
+    parse_sentiment_response,
+)
+from .snapshot import TickerSnapshot, analyze_ticker
 
 
 @dataclass
@@ -32,8 +30,9 @@ class CycleResult:
     snapshot: TickerSnapshot
     # The cascade fields stay None when the gate is quiet, or when the gate
     # is material but no news / model endpoint was supplied (batch runs).
-    sentiment: object | None = None
+    sentiment: SentimentSignal | None = None
     debate: DebateState | None = None
+    debate_history: list[DebateState] | None = None
     trader: TraderDecision | None = None
 
 
@@ -43,7 +42,11 @@ def run_cycle(
     lookback_days: int,
     news_text: str | None = None,
     base_url: str | None = None,
+    force: bool = False,
 ) -> CycleResult:
+    """`force=True` runs the LLM cascade even on a quiet gate — for
+    testing/demoing the full chain on a day nothing triggers. The real gate
+    result is still recorded on the snapshot; force only bypasses the early exit."""
     snapshot = analyze_ticker(ticker, lookback_days)
     if not snapshot.has_data:
         return CycleResult(snapshot=snapshot)
@@ -53,13 +56,16 @@ def run_cycle(
     store.save_fundamentals(conn, ticker, dt.date.today().isoformat(), fundamentals)
 
     # Gate is the cost lever: no material change -> exit before any LLM call.
-    if not snapshot.gate_result.material:
+    if not snapshot.gate_result.material and not force:
         return CycleResult(snapshot=snapshot)
 
-    # Material, but batch runs have no per-ticker news source / endpoint yet;
-    # can't reason without those, so stop at the (persisted) deterministic result.
-    if news_text is None or base_url is None:
+    # Material change. Reasoning needs a model endpoint; batch runs pass none,
+    # so they stop at the (persisted) deterministic result. Given an endpoint,
+    # fetch news automatically unless the caller supplied it (e.g. for testing).
+    if base_url is None:
         return CycleResult(snapshot=snapshot)
+    if news_text is None:
+        news_text = data_source.fetch_news(ticker)
 
     reasons = snapshot.gate_result.reasons
     analyst_messages = build_sentiment_prompt(
@@ -72,7 +78,7 @@ def run_cycle(
     # NOTE: how the debate should consume large/multi-article news vs. the
     # analyst's distilled summary is an open design decision (not resolved).
     # For now the debate keeps taking the raw news_text, as originally built.
-    debate = run_debate(
+    debate, debate_history = run_debate(
         ticker,
         snapshot.close,
         snapshot.rsi,
@@ -82,13 +88,31 @@ def run_cycle(
         base_url,
     )
 
-    trader_messages = build_trader_prompt(
-        ticker, snapshot.close, snapshot.rsi, snapshot.macd_hist, reasons, debate
+    trader = run_trader(
+        ticker,
+        snapshot.close,
+        snapshot.rsi,
+        snapshot.macd_hist,
+        reasons,
+        debate,
+        base_url,
     )
-    trader = parse_trader_response(chat_completion(trader_messages, base_url=base_url))
+
+    # Finer-grained than fundamentals' date-only as_of: a --force demo run can
+    # fire more than once a day for the same ticker, and date-only would
+    # silently overwrite the earlier decision instead of recording both.
+    as_of = dt.datetime.now().isoformat(timespec="seconds")
+    store.save_decision(
+        conn, ticker, as_of, snapshot.gate_result, news_text, sentiment, trader
+    )
+    store.save_debate_turns(conn, ticker, as_of, debate_history)
 
     return CycleResult(
-        snapshot=snapshot, sentiment=sentiment, debate=debate, trader=trader
+        snapshot=snapshot,
+        sentiment=sentiment,
+        debate=debate,
+        debate_history=debate_history,
+        trader=trader,
     )
 
 
@@ -129,15 +153,19 @@ def _print_cycle(ticker: str, result: CycleResult) -> None:
 if __name__ == "__main__":
     import sys
 
-    # No args -> batch watchlist (deterministic only).
-    # TICKER "news" [base_url] -> single ticker with the full LLM cascade.
-    if len(sys.argv) > 1:
-        ticker = sys.argv[1]
-        news_text = sys.argv[2] if len(sys.argv) > 2 else "No major news today."
-        base_url = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:8080"
+    # No args -> batch watchlist (deterministic only, no news source).
+    # TICKER [base_url] [--force] -> single ticker, full live cascade with
+    #   auto-fetched news. --force runs the cascade even on a quiet gate.
+    args = [a for a in sys.argv[1:] if a != "--force"]
+    force = "--force" in sys.argv
+    if args:
+        ticker = args[0]
+        base_url = args[1] if len(args) > 1 else "http://localhost:8080"
         config = load_config()
         conn = store.get_connection()
-        result = run_cycle(conn, ticker, config.lookback_days, news_text, base_url)
+        result = run_cycle(
+            conn, ticker, config.lookback_days, base_url=base_url, force=force
+        )
         conn.close()
         _print_cycle(ticker, result)
     else:

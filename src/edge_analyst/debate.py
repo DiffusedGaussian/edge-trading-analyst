@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .indicators import format_market_context
 from .llm_parsing import extract_field
 
 _STANCES = {"buy", "hold", "sell"}
@@ -49,12 +50,8 @@ def build_debate_prompt(
     opposing_key_point: str | None,
 ) -> list[dict]:
     system_prompt = _BULL_SYSTEM_PROMPT if persona == "bull" else _BEAR_SYSTEM_PROMPT
-    user_prompt = f"""Ticker: {ticker}
-Current close: ${close:.2f}
-RSI: {rsi_value:.1f}
-MACD histogram: {macd_hist:.3f}
-Triggered rules: {", ".join(fired_reasons) if fired_reasons else "none"}
-News: {news_text}"""
+    context = format_market_context(ticker, close, rsi_value, macd_hist, fired_reasons)
+    user_prompt = f"{context}\nNews: {news_text}"
     if opposing_key_point:
         opponent = "Bear" if persona == "bull" else "Bull"
         user_prompt += f"\n{opponent}'s current strongest point: {opposing_key_point}"
@@ -72,7 +69,7 @@ class DebateTurn:
 
 
 def parse_debate_response(text: str) -> DebateTurn:
-    """Same forgiving line-scan pattern as analyst.py — hard defaults on any
+    """Same forgiving line-scan pattern as news_analyst.py — hard defaults on any
     parse miss (Hold/low/placeholder), never raises."""
     stance = (extract_field(text, "STANCE") or "").lower()
     if stance not in _STANCES:
@@ -110,11 +107,15 @@ def run_debate(
     news_text: str,
     base_url: str,
     max_rounds: int = 2,
-) -> DebateState:
+) -> tuple[DebateState, list[DebateState]]:
+    """Returns (final_state, history) — history has one entry per round
+    actually run, so callers can persist the full debate, not just the
+    outcome (storage is free, unlike the LLM tokens spent producing it)."""
     from .llm_client import chat_completion
 
     bear_key_point = None
     state = None
+    history: list[DebateState] = []
     for round_num in range(1, max_rounds + 1):
         bull_messages = build_debate_prompt(
             "bull",
@@ -145,12 +146,13 @@ def run_debate(
         )
 
         state = DebateState(round=round_num, bull=bull_turn, bear=bear_turn)
+        history.append(state)
         bear_key_point = bear_turn.key_point
 
         if round_num == max_rounds or not should_continue_debate(state):
             break
 
-    return state
+    return state, history
 
 
 _ACTIONS = {"buy", "hold", "sell"}
@@ -177,13 +179,13 @@ def build_trader_prompt(
     fired_reasons: list[str],
     state: DebateState,
 ) -> list[dict]:
-    user_prompt = f"""Ticker: {ticker}
-Current close: ${close:.2f}
-RSI: {rsi_value:.1f}
-MACD histogram: {macd_hist:.3f}
-Triggered rules: {", ".join(fired_reasons) if fired_reasons else "none"}
-Bull: {state.bull.stance} ({state.bull.confidence}) — {state.bull.key_point}
-Bear: {state.bear.stance} ({state.bear.confidence}) — {state.bear.key_point}"""
+    context = format_market_context(ticker, close, rsi_value, macd_hist, fired_reasons)
+    bull, bear = state.bull, state.bear
+    user_prompt = (
+        f"{context}\n"
+        f"Bull: {bull.stance} ({bull.confidence}) — {bull.key_point}\n"
+        f"Bear: {bear.stance} ({bear.confidence}) — {bear.key_point}"
+    )
     return [
         {"role": "system", "content": _TRADER_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
