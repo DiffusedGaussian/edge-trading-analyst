@@ -1,7 +1,7 @@
 """Shared deterministic core: fetch -> indicators -> gate, as one function.
 
 Previously this exact sequence was reimplemented inline in three places
-(pipeline batch run, analyst __main__, cycle draft). It lives here once now;
+(pipeline batch run, news_analyst __main__, cycle draft). It lives here once now;
 everything that needs "the current deterministic picture for a ticker" calls
 analyze_ticker() and gets a TickerSnapshot. No LLM, no persistence — just the
 computation. Callers decide what to persist and whether to spend LLM tokens.

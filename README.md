@@ -45,17 +45,18 @@ pattern), not as a dependency.
 
 ```
 src/edge_analyst/
-  config.py        watchlist/config loading
-  data_source.py    yfinance wrapper (OHLCV + fundamentals snapshot)
+  config.py         watchlist/config loading
+  data_source.py    yfinance wrapper (OHLCV + fundamentals + news snapshot)
   indicators.py     SMA / EMA / MACD / RSI — pure functions, no LLM
   gate.py           materiality gate: crossing + level rules, OR-combined
-  store.py          SQLite persistence (bars, fundamentals)
-  pipeline.py       wires data -> indicators -> gate -> persist (Phases 1-2)
+  snapshot.py       glues fetch -> indicators -> gate into one TickerSnapshot
+  store.py          SQLite persistence (bars, fundamentals, decisions, debate_turns)
+  pipeline.py       the orchestrator: snapshot -> persist -> gate -> LLM cascade
   llm_client.py     thin HTTP client for llama-server's OpenAI-compatible API
   llm_parsing.py    shared forgiving sentinel-field parser
-  analyst.py        Phase 3: quick-tier news/sentiment analyst
+  news_analyst.py   Phase 3: quick-tier news/sentiment analyst
   debate.py         Phase 4: bull/bear debate + trader synthesis
-tests/              indicator/gate smoke tests (design-decision regressions)
+tests/              unit + smoke tests (design-decision regressions)
 deploy/             pull-based Jetson deploy: systemd service + timer, deploy.sh
 config/watchlist.yaml
 ```
@@ -76,13 +77,15 @@ some `base_url`, e.g. on the Jetson:
 ```bash
 ./llama-server -hf ggml-org/gemma-3-1b-it-GGUF -ngl 99   # quick tier, default :8080
 
-uv run python -m edge_analyst.analyst AAPL "Some news headline." http://localhost:8080
-uv run python -m edge_analyst.debate  AAPL "Some news headline." http://localhost:8080
+uv run python -m edge_analyst.pipeline AAPL http://localhost:8080          # single ticker, live cascade
+uv run python -m edge_analyst.pipeline AAPL http://localhost:8080 --force  # demo the cascade even on a quiet gate
 ```
 
-`analyst.py`'s `__main__` prints the prompt, raw model output, and parsed
-`SentimentSignal`. `debate.py`'s `__main__` runs the full analyst → debate → trader
-chain and prints the final `DebateState` and `TraderDecision`.
+News is auto-fetched (bounded, pre-summarized via yfinance) when the gate is
+material and a `base_url` is given. `run_cycle` prints the gate outcome plus, when
+the cascade runs, the parsed `SentimentSignal`, `DebateState`, and `TraderDecision`
+— and persists the news digest and every LLM output to SQLite (`decisions` /
+`debate_turns` tables) alongside the deterministic bars/fundamentals.
 
 ## Deploying to the Jetson
 

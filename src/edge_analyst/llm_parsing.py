@@ -1,5 +1,5 @@
 """Shared forgiving-parser primitive for sentinel key-value LLM output.
-Used by both analyst.py and debate.py — same failure modes, same fix."""
+Used by both news_analyst.py and debate.py — same failure modes, same fix."""
 
 from __future__ import annotations
 
