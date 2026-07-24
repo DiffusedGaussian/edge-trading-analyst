@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 CREATE TABLE IF NOT EXISTS decisions (
     ticker TEXT NOT NULL,
     as_of TEXT NOT NULL,
+    close REAL, rsi REAL, macd_hist REAL,
     gate_reasons TEXT,
     news_text TEXT,
     sentiment_label TEXT, sentiment_score REAL,
@@ -53,6 +54,19 @@ CREATE TABLE IF NOT EXISTS debate_turns (
     side TEXT NOT NULL,
     stance TEXT, key_point TEXT, confidence TEXT,
     PRIMARY KEY (ticker, as_of, round, side)
+);
+
+-- Judge output over a (ticker, as_of) decision. Keyed on judge_model too, so
+-- re-judging with a different/bigger model doesn't clobber a prior judgment.
+CREATE TABLE IF NOT EXISTS judgments (
+    ticker TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    judge_model TEXT NOT NULL,
+    bull_bear_distinct TEXT, indicator_consistent TEXT,
+    news_fidelity TEXT, trader_consistent TEXT,
+    overall_score REAL, notes TEXT,
+    judged_at TEXT,
+    PRIMARY KEY (ticker, as_of, judge_model)
 );
 """
 
@@ -115,6 +129,9 @@ def save_decision(
     conn: sqlite3.Connection,
     ticker: str,
     as_of: str,
+    close: float,
+    rsi: float,
+    macd_hist: float,
     gate_result: GateResult,
     news_text: str | None,
     sentiment: SentimentSignal | None,
@@ -122,14 +139,17 @@ def save_decision(
 ) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO decisions
-           (ticker, as_of, gate_reasons, news_text,
+           (ticker, as_of, close, rsi, macd_hist, gate_reasons, news_text,
             sentiment_label, sentiment_score, sentiment_confidence, sentiment_rationale,
             trader_action, trader_reasoning,
             trader_entry_price, trader_stop_loss, trader_position_sizing)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             ticker,
             as_of,
+            close,
+            rsi,
+            macd_hist,
             ",".join(gate_result.reasons),
             news_text,
             sentiment.label if sentiment else None,
@@ -181,5 +201,90 @@ def save_debate_turns(
            (ticker, as_of, round, side, stance, key_point, confidence)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         rows,
+    )
+    conn.commit()
+
+
+_DECISION_COLUMNS = [
+    "ticker",
+    "as_of",
+    "close",
+    "rsi",
+    "macd_hist",
+    "gate_reasons",
+    "news_text",
+    "sentiment_label",
+    "sentiment_score",
+    "sentiment_confidence",
+    "sentiment_rationale",
+    "trader_action",
+    "trader_reasoning",
+    "trader_entry_price",
+    "trader_stop_loss",
+    "trader_position_sizing",
+]
+
+
+def fetch_decisions_for_judging(
+    conn: sqlite3.Connection, limit: int = 20
+) -> list[dict]:
+    """One dict per (ticker, as_of) decision, most recent first, with its full
+    debate history nested under "debate_turns" — everything eval/rubric.py's
+    build_judge_prompt needs, no further DB access required from the judge."""
+    rows = conn.execute(
+        f"""SELECT {", ".join(_DECISION_COLUMNS)}
+            FROM decisions ORDER BY as_of DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    records = [dict(zip(_DECISION_COLUMNS, row, strict=True)) for row in rows]
+
+    turns_by_key: dict[tuple[str, str], list[dict]] = {}
+    turn_rows = conn.execute(
+        """SELECT ticker, as_of, round, side, stance, key_point, confidence
+           FROM debate_turns ORDER BY ticker, as_of, round, side"""
+    ).fetchall()
+    for ticker, as_of, round_, side, stance, key_point, confidence in turn_rows:
+        turns_by_key.setdefault((ticker, as_of), []).append(
+            {
+                "round": round_,
+                "side": side,
+                "stance": stance,
+                "key_point": key_point,
+                "confidence": confidence,
+            }
+        )
+
+    for record in records:
+        record["debate_turns"] = turns_by_key.get(
+            (record["ticker"], record["as_of"]), []
+        )
+    return records
+
+
+def save_judgment(
+    conn: sqlite3.Connection,
+    ticker: str,
+    as_of: str,
+    judge_model: str,
+    judgment: dict,
+    judged_at: str,
+) -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO judgments
+           (ticker, as_of, judge_model, bull_bear_distinct, indicator_consistent,
+            news_fidelity, trader_consistent, overall_score, notes, judged_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            ticker,
+            as_of,
+            judge_model,
+            judgment.get("bull_bear_distinct"),
+            judgment.get("indicator_consistent"),
+            judgment.get("news_fidelity"),
+            judgment.get("trader_consistent"),
+            judgment.get("overall_score"),
+            judgment.get("notes"),
+            judged_at,
+        ),
     )
     conn.commit()
