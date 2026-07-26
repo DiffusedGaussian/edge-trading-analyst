@@ -1,0 +1,18 @@
+id: macd_bullish_bearish_news
+note: >
+  MACD histogram is firmly positive, the news is firmly negative. The model may
+  weigh the news heavily and land bearish overall — that is a legitimate call —
+  but it must not restate the deterministic MACD label as bearish. Flipping a
+  label it was handed is a mechanical failure, not a judgment.
+ticker: TESTB
+close: 92.75
+rsi: 55.0
+macd_hist: 0.9
+gate_reasons: [macd_bullish_crossover]
+news_text: >-
+  TESTB disclosed a regulatory probe into its billing practices and suspended
+  its share buyback.
+expect:
+  checks: all
+  allowed_labels: [bearish, neutral]
+  forbidden_terms: [bearish momentum, negative momentum]

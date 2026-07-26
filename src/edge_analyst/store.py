@@ -62,6 +62,34 @@ CREATE TABLE IF NOT EXISTS debate_turns (
     PRIMARY KEY (ticker, as_of, round, side)
 );
 
+-- Tier 0 fixture runs. Synthetic fixtures deliberately never touch `decisions`:
+-- that table is real market history, and a TESTA row in it would corrupt every
+-- replayed-real comparison downstream. These two tables are the synthetic side
+-- of that boundary.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    run_id TEXT PRIMARY KEY,        -- iso timestamp + model_name slug
+    model_name TEXT NOT NULL,
+    base_url TEXT, stage TEXT,
+    k INTEGER, seed INTEGER, temperature REAL,
+    started_at TEXT, finished_at TEXT,
+    git_sha TEXT                    -- so a scorecard is traceable to code
+);
+
+CREATE TABLE IF NOT EXISTS eval_samples (
+    run_id TEXT NOT NULL,
+    fixture_id TEXT NOT NULL,
+    sample_idx INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    raw_output TEXT,                -- the full raw text; becomes a CI fixture
+    parsed_json TEXT,               -- parsed dataclass as JSON
+    fallbacks TEXT,                 -- comma-joined
+    finish_reason TEXT,
+    prompt_ms REAL, predicted_ms REAL,
+    prompt_tokens INTEGER, completion_tokens INTEGER,
+    checks_json TEXT NOT NULL,      -- [{name, passed, detail}, ...]
+    PRIMARY KEY (run_id, fixture_id, sample_idx, stage)
+);
+
 -- Judge output over a (ticker, as_of) decision. Keyed on judge_model too, so
 -- re-judging with a different/bigger model doesn't clobber a prior judgment.
 CREATE TABLE IF NOT EXISTS judgments (
@@ -380,6 +408,93 @@ def fetch_decisions_for_pairwise(
         if counterpart is not None:
             pairs.append((record, counterpart))
     return pairs
+
+
+_EVAL_SAMPLE_COLUMNS = [
+    "run_id",
+    "fixture_id",
+    "sample_idx",
+    "stage",
+    "raw_output",
+    "parsed_json",
+    "fallbacks",
+    "finish_reason",
+    "prompt_ms",
+    "predicted_ms",
+    "prompt_tokens",
+    "completion_tokens",
+    "checks_json",
+]
+
+
+def save_eval_run(conn: sqlite3.Connection, run: dict) -> None:
+    """Upsert one Tier 0 run's metadata. Called twice — once at the start so a
+    crashed run still leaves a record of what was attempted, once at the end to
+    stamp finished_at."""
+    conn.execute(
+        """INSERT OR REPLACE INTO eval_runs
+           (run_id, model_name, base_url, stage, k, seed, temperature,
+            started_at, finished_at, git_sha)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            run["run_id"],
+            run["model_name"],
+            run.get("base_url"),
+            run.get("stage"),
+            run.get("k"),
+            run.get("seed"),
+            run.get("temperature"),
+            run.get("started_at"),
+            run.get("finished_at"),
+            run.get("git_sha"),
+        ),
+    )
+    conn.commit()
+
+
+def save_eval_sample(conn: sqlite3.Connection, sample: dict) -> None:
+    conn.execute(
+        f"""INSERT OR REPLACE INTO eval_samples
+            ({", ".join(_EVAL_SAMPLE_COLUMNS)})
+            VALUES ({", ".join("?" * len(_EVAL_SAMPLE_COLUMNS))})""",
+        tuple(sample.get(column) for column in _EVAL_SAMPLE_COLUMNS),
+    )
+    conn.commit()
+
+
+def fetch_eval_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    columns = [
+        "run_id",
+        "model_name",
+        "base_url",
+        "stage",
+        "k",
+        "seed",
+        "temperature",
+        "started_at",
+        "finished_at",
+        "git_sha",
+    ]
+    row = conn.execute(
+        f"SELECT {', '.join(columns)} FROM eval_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    return dict(zip(columns, row, strict=True)) if row else None
+
+
+def fetch_eval_samples(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        f"""SELECT {", ".join(_EVAL_SAMPLE_COLUMNS)} FROM eval_samples
+            WHERE run_id = ? ORDER BY fixture_id, stage, sample_idx""",
+        (run_id,),
+    ).fetchall()
+    return [dict(zip(_EVAL_SAMPLE_COLUMNS, row, strict=True)) for row in rows]
+
+
+def latest_eval_run_id(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT run_id FROM eval_runs ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+    return row[0] if row else None
 
 
 def save_judgment(

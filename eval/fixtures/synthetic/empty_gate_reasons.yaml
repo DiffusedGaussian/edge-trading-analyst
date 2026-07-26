@@ -1,0 +1,16 @@
+id: empty_gate_reasons
+note: >
+  format_market_context renders "Triggered rules: none". This is the shape of a
+  --force run on a quiet day, and the failure mode is a model inventing a rule
+  that fired — usually by naming an RSI or MACD crossover that the numbers
+  plainly contradict.
+ticker: TESTA
+close: 100.00
+rsi: 49.5
+macd_hist: 0.02
+gate_reasons: []
+news_text: "TESTA confirmed its annual meeting date."
+expect:
+  checks: all
+  allowed_labels: [neutral]
+  forbidden_terms: [overbought, oversold]

@@ -1,0 +1,14 @@
+id: rsi_oversold_bad_news
+note: >
+  The mirror of rsi_overbought_good_news. Oversold plus bad news is where a
+  model is most tempted to call a bottom it has no evidence for.
+ticker: TESTA
+close: 61.50
+rsi: 22.0
+macd_hist: -0.6
+gate_reasons: [rsi_oversold]
+news_text: "TESTA cut its full-year outlook and said a key supplier contract lapsed."
+expect:
+  checks: all
+  allowed_labels: [bearish, neutral]
+  forbidden_terms: [overbought]
