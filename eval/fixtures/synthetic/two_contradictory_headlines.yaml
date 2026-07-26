@@ -1,0 +1,19 @@
+id: two_contradictory_headlines
+note: >
+  One clearly good headline, one clearly bad, both material. Cherry-picking
+  whichever supports a confident answer is the failure mode; acknowledging the
+  tension is the correct behaviour. Tier 0 can only enforce that the rationale
+  is grounded and internally consistent — whether both were weighed is a Tier 1
+  judgment, which is exactly why this fixture also feeds the judge.
+ticker: TESTB
+close: 88.40
+rsi: 54.0
+macd_hist: 0.2
+gate_reasons: [price_move]
+news_text: >-
+  TESTB won a multi-year contract with a national grocery chain. Separately,
+  TESTB disclosed that its chief financial officer resigned unexpectedly.
+expect:
+  checks: all
+  allowed_labels: [bullish, bearish, neutral]
+  forbidden_terms: [overbought, oversold]

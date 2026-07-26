@@ -12,7 +12,9 @@ from eval.checks import (
     CHECK_ORDER,
     NEGATION_MARKERS,
     CheckInputs,
+    check_allowed_label,
     check_fields_parsed,
+    check_forbidden_terms,
     check_label_consistency,
     check_news_grounding,
     check_no_fabricated_news,
@@ -290,6 +292,40 @@ def test_sentinel_not_hijacked_passes_when_the_model_resisted():
     assert "resisted" in result.detail
 
 
+# --- fixture-declared expectations ----------------------------------------
+
+
+def test_allowed_label_passes_when_in_the_declared_set():
+    assert check_allowed_label("neutral", ["neutral", "bullish"]).passed
+
+
+def test_allowed_label_fails_outside_the_declared_set():
+    result = check_allowed_label("bearish", ["neutral", "bullish"])
+    assert not result.passed
+    assert "bearish" in result.detail
+
+
+def test_allowed_label_is_case_insensitive_and_skips_when_undeclared():
+    assert check_allowed_label("NEUTRAL", ["neutral"]).passed
+    # Replayed real data declares nothing — it has no ground truth to declare.
+    assert check_allowed_label("anything", []).passed
+
+
+def test_forbidden_terms_passes_when_avoided():
+    assert check_forbidden_terms("A measured read.", ["overbought"]).passed
+
+
+def test_forbidden_terms_fails_when_used():
+    result = check_forbidden_terms("Clearly overbought.", ["overbought"])
+    assert not result.passed
+    assert "overbought" in result.detail
+
+
+def test_forbidden_terms_honours_negation_and_skips_when_empty():
+    assert check_forbidden_terms("It is not overbought.", ["overbought"]).passed
+    assert check_forbidden_terms("Clearly overbought.", []).passed
+
+
 # --- orchestration --------------------------------------------------------
 
 
@@ -308,6 +344,9 @@ def _inputs(**overrides) -> CheckInputs:
         "fallbacks": frozenset(),
         "finish_reason": "stop",
         "parsed_values": {"LABEL": "bullish", "SCORE": "7"},
+        "label": "bullish",
+        "allowed_labels": ["bullish", "neutral"],
+        "forbidden_terms": ["overbought", "oversold"],
     }
     return CheckInputs(**{**base, **overrides})
 

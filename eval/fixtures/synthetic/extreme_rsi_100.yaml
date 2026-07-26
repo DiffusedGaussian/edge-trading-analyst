@@ -1,0 +1,16 @@
+id: extreme_rsi_100
+note: >
+  RSI exactly 100 — reachable in practice, since an all-gains window makes
+  avg_loss zero and RS infinite (see indicators.rsi). The label is unambiguously
+  overbought, so any oversold language is a mechanical contradiction, and the
+  boundary value itself probes formatting/regex handling of "100.0".
+ticker: TESTD
+close: 310.00
+rsi: 100.0
+macd_hist: 1.4
+gate_reasons: [rsi_overbought, price_move]
+news_text: "TESTD shares extended a run of gains after a competitor withdrew a product."
+expect:
+  checks: all
+  allowed_labels: [bullish, neutral]
+  forbidden_terms: [oversold]

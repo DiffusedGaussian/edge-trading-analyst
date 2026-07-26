@@ -1,0 +1,15 @@
+id: specific_number_in_news
+note: >
+  Exactly one figure in the input (12%). Numeric fidelity: any other percentage
+  in the model's prose was invented. This is the check a judge cannot do
+  reliably without the input side by side.
+ticker: TESTA
+close: 100.00
+rsi: 58.0
+macd_hist: 0.3
+gate_reasons: [macd_bullish_crossover]
+news_text: "TESTA reported quarterly revenue up 12% year over year."
+expect:
+  checks: all
+  allowed_labels: [bullish, neutral]
+  forbidden_terms: [overbought, oversold]

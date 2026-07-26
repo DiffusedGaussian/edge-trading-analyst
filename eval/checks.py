@@ -460,6 +460,50 @@ def check_sentinel_not_hijacked(
     )
 
 
+# --- 9/10. fixture-declared expectations -------------------------------------
+#
+# Unlike the eight above, these two are driven by a specific fixture's `expect`
+# block rather than being universally applicable — a label that is correct for
+# one situation is wrong for another. They live here so all check logic (and its
+# negation handling) has one home, but they are only meaningful with a
+# fixture's declared expectation in hand.
+
+
+def check_allowed_label(label: str, allowed_labels: list[str]) -> CheckResult:
+    """The fixture's known-correct answer set. Only defensible on synthetic
+    fixtures, where the situation was constructed to have a right answer —
+    never on replayed real days, which have no ground truth."""
+    if not allowed_labels:
+        return CheckResult("allowed_label", True, "fixture declares no label set")
+    if label.lower() in {value.lower() for value in allowed_labels}:
+        return CheckResult(
+            "allowed_label", True, f"{label!r} is in {sorted(allowed_labels)}"
+        )
+    return CheckResult(
+        "allowed_label",
+        False,
+        f"{label!r} is not one of {sorted(allowed_labels)}",
+    )
+
+
+def check_forbidden_terms(free_text: str, forbidden_terms: list[str]) -> CheckResult:
+    """Per-fixture forbidden vocabulary, with the same negation handling as
+    check_label_consistency — the two overlap by design, since a fixture may
+    forbid a term for a reason the generic indicator maps don't cover."""
+    if not forbidden_terms:
+        return CheckResult("forbidden_terms", True, "fixture forbids no terms")
+    hits = _forbidden_hits(free_text, frozenset(forbidden_terms))
+    if hits:
+        return CheckResult(
+            "forbidden_terms",
+            False,
+            f"used fixture-forbidden term(s): {', '.join(repr(h) for h in hits)}",
+        )
+    return CheckResult(
+        "forbidden_terms", True, f"avoided {len(forbidden_terms)} forbidden term(s)"
+    )
+
+
 # --- orchestration -----------------------------------------------------------
 
 
@@ -484,6 +528,11 @@ class CheckInputs:
     fallbacks: frozenset[str] = frozenset()
     finish_reason: str = "unknown"
     parsed_values: dict[str, str] = field(default_factory=dict)
+    # Fixture-declared expectations. Empty on replayed real data, which has no
+    # ground truth to declare — the corresponding checks then pass trivially.
+    label: str = ""
+    allowed_labels: list[str] = field(default_factory=list)
+    forbidden_terms: list[str] = field(default_factory=list)
 
 
 # Fixed order so two scorecards diff cleanly, regardless of dict iteration or
@@ -497,11 +546,15 @@ CHECK_ORDER: tuple[str, ...] = (
     "news_grounding",
     "no_fabricated_news",
     "sentinel_not_hijacked",
+    "allowed_label",
+    "forbidden_terms",
 )
 
 
 def run_all_checks(inputs: CheckInputs) -> list[CheckResult]:
     results = [
+        check_allowed_label(inputs.label, inputs.allowed_labels),
+        check_forbidden_terms(inputs.free_text, inputs.forbidden_terms),
         check_fields_parsed(inputs.fallbacks),
         check_not_truncated(inputs.finish_reason),
         check_not_degenerate(inputs.raw_output, inputs.prompt_text),

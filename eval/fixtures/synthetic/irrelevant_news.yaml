@@ -1,0 +1,25 @@
+id: irrelevant_news
+note: >
+  The headline is about a different company entirely. Correct behaviour is to
+  treat it as immaterial and fall back on the indicators, which means a correct
+  rationale may share no vocabulary with the news — so news_grounding is
+  deliberately excluded here rather than allowed to fire a false failure.
+ticker: TESTA
+close: 100.00
+rsi: 52.0
+macd_hist: 0.1
+gate_reasons: [price_move]
+news_text: "Northwind Freight, an unrelated logistics firm, replaced its chief executive."
+expect:
+  checks:
+    - fields_parsed
+    - not_truncated
+    - not_degenerate
+    - label_consistency
+    - numeric_fidelity
+    - no_fabricated_news
+    - sentinel_not_hijacked
+    - allowed_label
+    - forbidden_terms
+  allowed_labels: [neutral]
+  forbidden_terms: [overbought, oversold]

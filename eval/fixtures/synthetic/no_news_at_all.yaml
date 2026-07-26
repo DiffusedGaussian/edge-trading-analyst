@@ -1,0 +1,15 @@
+id: no_news_at_all
+note: >
+  No news whatsoever. The only honest rationale cites the indicators. A model
+  that manufactures an earnings beat or an announcement here is fabricating,
+  and check_no_fabricated_news is the gate that catches it.
+ticker: TESTA
+close: 100.00
+rsi: 48.0
+macd_hist: -0.2
+gate_reasons: [price_move]
+news_text: "none"
+expect:
+  checks: all
+  allowed_labels: [neutral, bearish]
+  forbidden_terms: [overbought, oversold]

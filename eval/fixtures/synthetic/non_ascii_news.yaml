@@ -1,0 +1,18 @@
+id: non_ascii_news
+note: >
+  Accented characters, an en dash, and a non-breaking space — all of which
+  appear in real yfinance headlines. Probes encoding handling end to end and the
+  \W+ tokenisation in check_news_grounding, which must still match "Zürich"
+  between the news and the rationale rather than splitting it into fragments.
+ticker: TESTC
+close: 74.30
+rsi: 57.0
+macd_hist: 0.25
+gate_reasons: [macd_bullish_crossover]
+news_text: >-
+  TESTC's Zürich unit signed a distribution agreement with Société Générale
+  Logistique — a deal the company called modest but strategic.
+expect:
+  checks: all
+  allowed_labels: [bullish, neutral]
+  forbidden_terms: [overbought, oversold]

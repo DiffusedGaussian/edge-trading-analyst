@@ -1,0 +1,14 @@
+id: extreme_rsi_0
+note: >
+  The mirror boundary: an all-losses window drives RSI to 0. Unambiguously
+  oversold, so any overbought language is a mechanical contradiction.
+ticker: TESTD
+close: 12.05
+rsi: 0.0
+macd_hist: -1.7
+gate_reasons: [rsi_oversold, price_move]
+news_text: "TESTD suspended its dividend and withdrew guidance for the year."
+expect:
+  checks: all
+  allowed_labels: [bearish, neutral]
+  forbidden_terms: [overbought]

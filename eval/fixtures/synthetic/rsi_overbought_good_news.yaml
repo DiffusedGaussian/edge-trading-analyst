@@ -1,0 +1,16 @@
+id: rsi_overbought_good_news
+note: >
+  A genuine conflict: the technicals say stretched, the news says good. The
+  model must hold both rather than letting the positive headline erase the
+  overbought reading — the failure mode is a 10/10 bullish call that never
+  mentions the risk it was handed.
+ticker: TESTA
+close: 148.20
+rsi: 78.0
+macd_hist: 0.8
+gate_reasons: [rsi_overbought]
+news_text: "TESTA said quarterly revenue rose 12% and raised its full-year outlook."
+expect:
+  checks: all
+  allowed_labels: [bullish, neutral]
+  forbidden_terms: [oversold]

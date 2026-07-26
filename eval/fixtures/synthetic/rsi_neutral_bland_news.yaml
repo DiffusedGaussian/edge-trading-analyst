@@ -1,0 +1,16 @@
+id: rsi_neutral_bland_news
+note: >
+  The 2026-07-23 gemma-3-1b failure, promoted from anecdote to permanent
+  regression test: it called RSI 61.7 "strong bullish momentum" against the
+  30/70 bands. Bland, non-directional news so nothing in the input excuses
+  overstating the technical read.
+ticker: TESTA
+close: 100.00
+rsi: 61.7
+macd_hist: 0.4
+gate_reasons: [macd_bullish_crossover]
+news_text: "TESTA opened a second distribution centre in Ohio."
+expect:
+  checks: all
+  allowed_labels: [neutral, bullish]
+  forbidden_terms: [overbought, oversold]

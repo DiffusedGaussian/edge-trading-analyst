@@ -1,0 +1,55 @@
+id: very_long_news
+note: >
+  ~3000 characters of news. Probes truncation against max_tokens=512 and the
+  512-token prompt budget on a 1B model: a response cut off mid-sentence parses
+  as a pile of fallbacks with no hint of the cause, which is why
+  check_not_truncated reads finish_reason directly. Also probes whether a model
+  drowning in context still emits the sentinel format at all.
+ticker: TESTC
+close: 214.60
+rsi: 66.0
+macd_hist: 0.5
+gate_reasons: [macd_bullish_crossover, price_move]
+news_text: >-
+  TESTC held its annual capital markets day and used the session to lay out a
+  three-year operating plan that management described as deliberately
+  unglamorous. The company reiterated its existing full-year revenue outlook and
+  said it now expects operating margin to land at the upper end of the range it
+  gave in February, attributing the improvement to lower freight costs and to a
+  warehouse automation programme that has been running quietly for six quarters.
+  Management spent most of the session on that programme. It said 14 of its 22
+  regional distribution sites have been converted, that the converted sites are
+  handling a materially higher order volume per shift than the unconverted ones,
+  and that the remaining conversions are scheduled to finish by the end of next
+  year. The chief operating officer said the programme had been slower than
+  originally planned because the company chose to avoid taking sites offline
+  during peak season, a decision she defended at length under questioning from
+  analysts who had expected faster progress. On demand, the picture management
+  presented was mixed and it said so. Order volumes in its core commercial
+  segment have been steady, with the company describing the segment as growing
+  slowly but predictably. Its smaller consumer segment has been weaker for three
+  consecutive quarters, and management said it no longer expects that segment to
+  return to growth this year, having previously suggested a second-half
+  recovery. It framed this as a demand problem rather than a competitive one,
+  noting that its own share within the segment has been stable. Several analysts
+  pushed back on that framing and pointed to a newer competitor that has been
+  discounting aggressively; management acknowledged the discounting but said it
+  had not seen a measurable effect on renewals. On capital allocation, the
+  company said its priority order is unchanged: maintain the automation
+  programme, then reduce net debt, then consider returning capital. It made no
+  commitment on a dividend and explicitly declined to comment on whether it
+  would resume share repurchases next year, saying only that the board reviews
+  the question annually. It confirmed that the previously announced disposal of
+  its small logistics brokerage arm remains on track to close in the current
+  quarter and that proceeds will go toward debt reduction. Asked about pricing,
+  management said it has passed through most input cost inflation and does not
+  plan further increases in the current environment. Asked about hiring, it said
+  headcount will be roughly flat, with reductions in warehouse roles at
+  converted sites offset by additions in engineering. The session closed with
+  the chief executive saying the company would rather be judged on the
+  automation programme finishing on schedule than on any single quarter's
+  results.
+expect:
+  checks: all
+  allowed_labels: [bullish, neutral]
+  forbidden_terms: [oversold]

@@ -1,0 +1,15 @@
+id: macd_flat
+note: >
+  A zero histogram supports no directional momentum claim at all. Small models
+  reliably invent one, because "flat" reads to them as a missing answer rather
+  than an answer.
+ticker: TESTA
+close: 100.00
+rsi: 50.0
+macd_hist: 0.0
+gate_reasons: [price_move]
+news_text: "TESTA named a new chief operating officer, effective next month."
+expect:
+  checks: all
+  allowed_labels: [neutral]
+  forbidden_terms: [bullish momentum, bearish momentum]
