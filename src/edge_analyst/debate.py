@@ -66,22 +66,36 @@ class DebateTurn:
     stance: str
     key_point: str
     confidence: str
+    # Which sentinels fell back to a default — see SentimentSignal.fallbacks.
+    fallbacks: frozenset[str] = frozenset()
 
 
 def parse_debate_response(text: str) -> DebateTurn:
     """Same forgiving line-scan pattern as news_analyst.py — hard defaults on any
     parse miss (Hold/low/placeholder), never raises."""
+    fallbacks: set[str] = set()
+
     stance = (extract_field(text, "STANCE") or "").lower()
     if stance not in _STANCES:
         stance = "hold"
+        fallbacks.add("STANCE")
 
     confidence = (extract_field(text, "CONFIDENCE") or "").lower()
     if confidence not in _CONFIDENCES:
         confidence = "low"
+        fallbacks.add("CONFIDENCE")
 
-    key_point = extract_field(text, "KEY_POINT") or "no key point parsed"
+    key_point = extract_field(text, "KEY_POINT")
+    if not key_point:
+        key_point = "no key point parsed"
+        fallbacks.add("KEY_POINT")
 
-    return DebateTurn(stance=stance, key_point=key_point, confidence=confidence)
+    return DebateTurn(
+        stance=stance,
+        key_point=key_point,
+        confidence=confidence,
+        fallbacks=frozenset(fallbacks),
+    )
 
 
 @dataclass
@@ -199,29 +213,55 @@ class TraderDecision:
     entry_price: float | None
     stop_loss: float | None
     position_sizing: float | None
+    # Which sentinels fell back to a default — see SentimentSignal.fallbacks.
+    fallbacks: frozenset[str] = frozenset()
 
 
-def _extract_optional_float(text: str, field: str) -> float | None:
+_NA_VALUES = {"na", "n/a", "none", "-"}
+
+
+def _extract_optional_float(text: str, field: str) -> tuple[float | None, bool]:
+    """Returns (value, parsed_ok). Both a literal `NA` and a missing/garbage
+    field yield None — the runtime contract, unchanged — but they are not the
+    same event: `NA` is the correct answer on a Hold, whereas an absent or
+    unparseable field is a format failure. parsed_ok separates them so eval can
+    count only the failures."""
     raw = extract_field(text, field)
+    if raw is not None and raw.strip().lower() in _NA_VALUES:
+        return None, True
     try:
-        return float(raw)
+        return float(raw), True
     except (TypeError, ValueError):
-        return None  # covers both a missing field and a literal "NA"
+        return None, False
 
 
 def parse_trader_response(text: str) -> TraderDecision:
+    fallbacks: set[str] = set()
+
     action = (extract_field(text, "ACTION") or "").lower()
     if action not in _ACTIONS:
         action = "hold"
+        fallbacks.add("ACTION")
 
-    reasoning = extract_field(text, "REASONING") or "no reasoning parsed"
+    reasoning = extract_field(text, "REASONING")
+    if not reasoning:
+        reasoning = "no reasoning parsed"
+        fallbacks.add("REASONING")
+
+    numbers = {}
+    for field in ("ENTRY_PRICE", "STOP_LOSS", "POSITION_SIZING"):
+        value, parsed_ok = _extract_optional_float(text, field)
+        numbers[field] = value
+        if not parsed_ok:
+            fallbacks.add(field)
 
     return TraderDecision(
         action=action,
         reasoning=reasoning,
-        entry_price=_extract_optional_float(text, "ENTRY_PRICE"),
-        stop_loss=_extract_optional_float(text, "STOP_LOSS"),
-        position_sizing=_extract_optional_float(text, "POSITION_SIZING"),
+        entry_price=numbers["ENTRY_PRICE"],
+        stop_loss=numbers["STOP_LOSS"],
+        position_sizing=numbers["POSITION_SIZING"],
+        fallbacks=frozenset(fallbacks),
     )
 
 

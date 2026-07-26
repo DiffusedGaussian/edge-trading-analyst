@@ -51,6 +51,12 @@ class SentimentSignal:
     score: float
     confidence: str
     rationale: str
+    # Sentinel names whose value fell back to a default because the model's
+    # output was missing or unparseable for them. Empty means fully parsed.
+    # Eval counts this — a model that never emits a parseable field scores as
+    # *broken*, not as mediocre neutral/5.0. Runtime ignores it entirely.
+    # Trailing and defaulted so existing positional construction still works.
+    fallbacks: frozenset[str] = frozenset()
 
 
 _LABELS = {"bullish", "bearish", "neutral"}
@@ -61,22 +67,38 @@ def parse_sentiment_response(text: str) -> SentimentSignal:
     """Forgiving line-scan parser: finds each labeled field anywhere in the
     text (tolerant of preambles/markdown fences around it), and falls back
     to a safe default per-field rather than raising on any single miss."""
+    fallbacks: set[str] = set()
+
     label = (extract_field(text, "LABEL") or "").lower()
     if label not in _LABELS:
         label = "neutral"
+        fallbacks.add("LABEL")
 
     confidence = (extract_field(text, "CONFIDENCE") or "").lower()
     if confidence not in _CONFIDENCES:
         confidence = "low"
+        fallbacks.add("CONFIDENCE")
 
     score_raw = extract_field(text, "SCORE")
     try:
         score = max(0.0, min(10.0, float(score_raw)))
     except (TypeError, ValueError):
+        # Both an absent SCORE and a garbage one ("SCORE: abc") land here, and
+        # both are format failures — the resulting 5.0 is not a real score.
         score = 5.0
+        fallbacks.add("SCORE")
 
-    rationale = extract_field(text, "RATIONALE") or "no rationale parsed"
+    # `not rationale`, not `is None`: an empty value ("RATIONALE:" with only
+    # whitespace) fell back before this change too, and must keep doing so.
+    rationale = extract_field(text, "RATIONALE")
+    if not rationale:
+        rationale = "no rationale parsed"
+        fallbacks.add("RATIONALE")
 
     return SentimentSignal(
-        label=label, score=score, confidence=confidence, rationale=rationale
+        label=label,
+        score=score,
+        confidence=confidence,
+        rationale=rationale,
+        fallbacks=frozenset(fallbacks),
     )
