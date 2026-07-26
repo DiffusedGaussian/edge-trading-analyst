@@ -103,7 +103,16 @@ def run_cycle(
     # silently overwrite the earlier decision instead of recording both.
     as_of = dt.datetime.now().isoformat(timespec="seconds")
     store.save_decision(
-        conn, ticker, as_of, snapshot.gate_result, news_text, sentiment, trader
+        conn,
+        ticker,
+        as_of,
+        snapshot.close,
+        snapshot.rsi,
+        snapshot.macd_hist,
+        snapshot.gate_result,
+        news_text,
+        sentiment,
+        trader,
     )
     store.save_debate_turns(conn, ticker, as_of, debate_history)
 

@@ -24,11 +24,17 @@ dev = [
     "ruff>=0.8",
     "pytest>=8.0",
 ]
+# LLM-as-judge (eval/modal_app.py). Local side only needs the Modal SDK to
+# deploy/invoke — vllm + torch are pip_install'd inside the Modal image only,
+# never a local dependency (same convention as the gaussian_splatting app).
+eval = [
+    "modal>=0.63",
+]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-src = ["src", "tests"]
+src = ["src", "tests", "eval"]
 
 [tool.ruff.lint]
 # Pragmatic default set: pyflakes (F), pycodestyle (E/W), isort (I), pyupgrade (UP),
