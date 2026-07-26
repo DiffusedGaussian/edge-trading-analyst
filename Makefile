@@ -6,7 +6,7 @@
 # the model-independent parts of the harness (checks, fixtures, aggregation, the
 # recorded-response replay) run in `make check`.
 .PHONY: install fmt lint test check run deploy \
-        eval-fixtures eval-report eval-compare eval-judge eval-pairwise
+        eval-fixtures eval-report eval-compare eval-judge eval-pairwise eval-calibrate
 
 install:            ## sync all deps incl. dev tools (ruff, pytest)
 	uv sync --frozen --dev
@@ -48,3 +48,6 @@ eval-judge:         ## Tier 1 on Modal (needs the eval extra + Modal auth)
 
 eval-pairwise:      ## Tier 1 bake-off: make eval-pairwise A=<model> B=<model>
 	uv run modal run eval/modal_app.py::run_pairwise --model-a $(A) --model-b $(B)
+
+eval-calibrate:     ## Tier 2: make eval-calibrate CMD="label --n 40" | CMD=score
+	uv run python -m eval.calibrate $(or $(CMD),score)

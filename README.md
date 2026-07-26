@@ -119,6 +119,9 @@ make eval-compare A=baseline B=<run_id>
 
 make eval-judge                                    # Tier 1, per-criterion
 make eval-pairwise A=gemma-3-1b-it B=olmoe-1b-7b   # Tier 1, A-vs-B
+
+make eval-calibrate CMD="label --n 40"             # Tier 2, hand-label (resumable)
+make eval-calibrate CMD=score                      # Tier 2, kappa vs the judge
 ```
 
 The eval targets are not in CI: it has no GPU and no `llama-server`. Everything
@@ -159,6 +162,18 @@ Tier 1 also warns when the judge and the model under test share a family
 (`rubric.same_family`) — Qwen2.5-32B scoring Qwen3-30B-A3B output is
 self-preference risk. `--second-judge` runs a different family and reports
 inter-judge agreement.
+
+Tier 2 is what makes Tiers 0–1 falsifiable: without it, a judge that answers
+"yes" to everything and a genuinely good cascade produce the same scorecard.
+`make eval-calibrate CMD=score` reports **Cohen's kappa** per criterion between
+your labels and the judge's — kappa rather than raw agreement, because raw
+agreement is inflated by the base rate (on a criterion where 90% of records are
+truly "yes", a yes-to-everything judge scores 90% and has learned nothing).
+
+Kappa below 0.4 on a criterion means **the rubric wording is broken, not the
+cascade**: fix `CRITERIA[criterion]` in `eval/rubric.py` and re-judge before
+drawing any conclusion about a model. Re-run `score` whenever the judge model or
+any criterion prompt changes — a rubric edit invalidates the previous kappa.
 
 The committed comparison floor is `eval/results/baseline.json`; see
 [`eval/results/README.md`](eval/results/README.md) for how to produce it and
