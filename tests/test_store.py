@@ -5,6 +5,8 @@ indirectly via pipeline.py before this.
 
 from __future__ import annotations
 
+import sqlite3
+
 from edge_analyst import store
 from edge_analyst.debate import DebateState, DebateTurn, TraderDecision
 from edge_analyst.gate import GateResult
@@ -228,3 +230,190 @@ def test_save_judgment_round_trips():
         3.0,
         "bull and bear echoed the same key point",
     )
+
+
+# --- model attribution + migration ------------------------------------------
+
+# The decisions/debate_turns DDL as it stood before the `model` column existed.
+# Any DB created by an earlier release looks like this, including the live
+# baseline — _migrate has to reach it, since CREATE TABLE IF NOT EXISTS won't.
+_PRE_MODEL_SCHEMA = """
+CREATE TABLE decisions (
+    ticker TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    close REAL, rsi REAL, macd_hist REAL,
+    gate_reasons TEXT,
+    news_text TEXT,
+    sentiment_label TEXT, sentiment_score REAL,
+    sentiment_confidence TEXT, sentiment_rationale TEXT,
+    trader_action TEXT, trader_reasoning TEXT,
+    trader_entry_price REAL, trader_stop_loss REAL, trader_position_sizing REAL,
+    PRIMARY KEY (ticker, as_of)
+);
+CREATE TABLE debate_turns (
+    ticker TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    stance TEXT, key_point TEXT, confidence TEXT,
+    PRIMARY KEY (ticker, as_of, round, side)
+);
+"""
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def test_migrate_adds_model_column_to_a_preexisting_db(tmp_path):
+    db_path = tmp_path / "old.db"
+    old = sqlite3.connect(db_path)
+    old.executescript(_PRE_MODEL_SCHEMA)
+    old.execute(
+        "INSERT INTO decisions (ticker, as_of, close) VALUES ('AAPL', 'then', 1.0)"
+    )
+    old.commit()
+    old.close()
+
+    conn = store.get_connection(db_path)
+
+    assert _columns(conn, "decisions").count("model") == 1
+    assert _columns(conn, "debate_turns").count("model") == 1
+    # Additive only: the pre-existing row survives, with a NULL model.
+    assert conn.execute("SELECT close, model FROM decisions").fetchone() == (1.0, None)
+
+
+def test_migrate_is_idempotent_across_connections(tmp_path):
+    db_path = tmp_path / "old.db"
+    old = sqlite3.connect(db_path)
+    old.executescript(_PRE_MODEL_SCHEMA)
+    old.close()
+
+    store.get_connection(db_path).close()
+    conn = store.get_connection(db_path)  # second open must not re-ALTER
+
+    assert _columns(conn, "decisions").count("model") == 1
+
+
+def _save(conn, ticker, as_of, model, action="buy"):
+    return store.save_decision(
+        conn,
+        ticker,
+        as_of,
+        150.0,
+        55.0,
+        0.5,
+        GateResult(material=True, reasons=["price_move"]),
+        "some news",
+        SentimentSignal(
+            label="bullish", score=7.0, confidence="high", rationale="a fact"
+        ),
+        TraderDecision(
+            action=action,
+            reasoning="strong case",
+            entry_price=150.0,
+            stop_loss=140.0,
+            position_sizing=5.0,
+        ),
+        model,
+    )
+
+
+def test_save_decision_records_the_model():
+    conn = store.get_connection(":memory:")
+    _save(conn, "AAPL", "2026-07-24T10:00:00", "olmoe-1b-7b")
+    assert conn.execute("SELECT model FROM decisions").fetchone()[0] == "olmoe-1b-7b"
+
+
+def test_save_decision_suffixes_as_of_rather_than_clobbering_another_model():
+    conn = store.get_connection(":memory:")
+    as_of = "2026-07-24T10:00:00"
+    first = _save(conn, "AAPL", as_of, "model-a")
+    second = _save(conn, "AAPL", as_of, "model-b")
+
+    assert first == as_of
+    assert second == f"{as_of}#2"
+    rows = conn.execute("SELECT as_of, model FROM decisions ORDER BY as_of").fetchall()
+    assert rows == [(as_of, "model-a"), (f"{as_of}#2", "model-b")]
+
+
+def test_save_decision_same_model_still_overwrites_in_place():
+    conn = store.get_connection(":memory:")
+    as_of = "2026-07-24T10:00:00"
+    _save(conn, "AAPL", as_of, "model-a", action="buy")
+    again = _save(conn, "AAPL", as_of, "model-a", action="sell")
+
+    assert again == as_of
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+    assert conn.execute("SELECT trader_action FROM decisions").fetchone()[0] == "sell"
+
+
+def test_save_decision_suffix_keeps_climbing_for_a_third_model():
+    conn = store.get_connection(":memory:")
+    as_of = "2026-07-24T10:00:00"
+    _save(conn, "AAPL", as_of, "model-a")
+    _save(conn, "AAPL", as_of, "model-b")
+    third = _save(conn, "AAPL", as_of, "model-c")
+
+    assert third == f"{as_of}#3"
+    assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 3
+
+
+def test_save_debate_turns_records_the_model():
+    conn = store.get_connection(":memory:")
+    history = [
+        DebateState(
+            round=1,
+            bull=DebateTurn(stance="buy", key_point="a", confidence="high"),
+            bear=DebateTurn(stance="sell", key_point="b", confidence="high"),
+        )
+    ]
+    store.save_debate_turns(conn, "AAPL", "2026-07-24T10:00:00", history, "olmoe-1b-7b")
+
+    models = conn.execute("SELECT DISTINCT model FROM debate_turns").fetchall()
+    assert models == [("olmoe-1b-7b",)]
+
+
+def test_fetch_decisions_for_judging_filters_on_model():
+    conn = store.get_connection(":memory:")
+    _save(conn, "AAPL", "2026-07-24T10:00:00", "model-a")
+    _save(conn, "MSFT", "2026-07-24T11:00:00", "model-b")
+
+    records = store.fetch_decisions_for_judging(conn, limit=10, model="model-b")
+
+    assert [r["ticker"] for r in records] == ["MSFT"]
+    assert records[0]["model"] == "model-b"
+    # No filter -> both, unchanged behaviour.
+    assert len(store.fetch_decisions_for_judging(conn, limit=10)) == 2
+
+
+def test_fetch_decisions_for_pairwise_matches_on_ticker_and_day():
+    conn = store.get_connection(":memory:")
+    # Same ticker, same day, different seconds -> a pair.
+    _save(conn, "AAPL", "2026-07-24T10:00:00", "model-a")
+    _save(conn, "AAPL", "2026-07-24T14:30:00", "model-b")
+    # Same ticker, different days -> not comparable, no pair.
+    _save(conn, "MSFT", "2026-07-24T10:00:00", "model-a")
+    _save(conn, "MSFT", "2026-07-25T10:00:00", "model-b")
+    # Only one model ran this ticker -> no pair.
+    _save(conn, "NVDA", "2026-07-24T10:00:00", "model-a")
+
+    pairs = store.fetch_decisions_for_pairwise(conn, "model-a", "model-b")
+
+    assert len(pairs) == 1
+    a, b = pairs[0]
+    assert a["ticker"] == b["ticker"] == "AAPL"
+    assert a["model"] == "model-a"
+    assert b["model"] == "model-b"
+
+
+def test_fetch_decisions_for_pairwise_takes_the_latest_run_per_ticker_day():
+    conn = store.get_connection(":memory:")
+    _save(conn, "AAPL", "2026-07-24T09:00:00", "model-a", action="buy")
+    _save(conn, "AAPL", "2026-07-24T15:00:00", "model-a", action="sell")
+    _save(conn, "AAPL", "2026-07-24T16:00:00", "model-b")
+
+    pairs = store.fetch_decisions_for_pairwise(conn, "model-a", "model-b")
+
+    assert len(pairs) == 1
+    assert pairs[0][0]["as_of"] == "2026-07-24T15:00:00"
