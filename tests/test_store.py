@@ -407,6 +407,92 @@ def test_fetch_decisions_for_pairwise_matches_on_ticker_and_day():
     assert b["model"] == "model-b"
 
 
+def test_criterion_verdicts_round_trip_including_a_null_verdict():
+    """A NULL verdict means the judge's response was unparseable. Storing it as
+    NULL rather than a default is the whole reason this table replaced the wide
+    `judgments` row — a NULL cannot be silently averaged as a middling score."""
+    conn = store.get_connection(":memory:")
+    rows = [
+        {
+            "ticker": "AAPL",
+            "as_of": "2026-07-24T10:00:00",
+            "model": "gemma-3-1b-it",
+            "judge_model": "qwen2.5-32b",
+            "criterion": "news_fidelity",
+            "verdict": "yes",
+            "reason": "matches the headline",
+            "judged_at": "2026-07-24T11:00:00",
+        },
+        {
+            "ticker": "AAPL",
+            "as_of": "2026-07-24T10:00:00",
+            "model": "gemma-3-1b-it",
+            "judge_model": "qwen2.5-32b",
+            "criterion": "trader_consistent",
+            "verdict": None,
+            "reason": None,
+            "judged_at": "2026-07-24T11:00:00",
+        },
+    ]
+    store.save_criterion_verdicts(conn, rows)
+
+    fetched = store.fetch_criterion_verdicts(conn, judge_model="qwen2.5-32b")
+    assert [(r["criterion"], r["verdict"]) for r in fetched] == [
+        ("news_fidelity", "yes"),
+        ("trader_consistent", None),
+    ]
+    assert store.fetch_criterion_verdicts(conn, model="other") == []
+
+
+def test_criterion_verdicts_are_keyed_per_judge():
+    """Re-judging with a different model must not clobber the first judgment."""
+    conn = store.get_connection(":memory:")
+    base = {
+        "ticker": "AAPL",
+        "as_of": "2026-07-24T10:00:00",
+        "model": "gemma-3-1b-it",
+        "criterion": "news_fidelity",
+        "verdict": "yes",
+        "reason": "r",
+        "judged_at": "t",
+    }
+    store.save_criterion_verdicts(conn, [{**base, "judge_model": "judge-1"}])
+    store.save_criterion_verdicts(
+        conn, [{**base, "judge_model": "judge-2", "verdict": "no"}]
+    )
+    assert len(store.fetch_criterion_verdicts(conn)) == 2
+
+
+def test_pairwise_results_keep_both_display_orders():
+    """order_shown is in the PK: storing only one order throws away the
+    order-flip measurement, which is the judge's own noise floor."""
+    conn = store.get_connection(":memory:")
+    base = {
+        "ticker": "AAPL",
+        "as_of_a": "2026-07-24T10:00:00",
+        "as_of_b": "2026-07-24T14:00:00",
+        "model_a": "model-a",
+        "model_b": "model-b",
+        "judge_model": "judge",
+        "criterion": "news_fidelity",
+        "reason": "r",
+        "judged_at": "t",
+    }
+    store.save_pairwise_results(
+        conn,
+        [
+            {**base, "order_shown": "ab", "winner": "model_a"},
+            {**base, "order_shown": "ba", "winner": "model_b"},
+        ],
+    )
+
+    rows = store.fetch_pairwise_results(conn, "model-a", "model-b")
+    assert [(r["order_shown"], r["winner"]) for r in rows] == [
+        ("ab", "model_a"),
+        ("ba", "model_b"),
+    ]
+
+
 def test_fetch_decisions_for_pairwise_takes_the_latest_run_per_ticker_day():
     conn = store.get_connection(":memory:")
     _save(conn, "AAPL", "2026-07-24T09:00:00", "model-a", action="buy")

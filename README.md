@@ -50,12 +50,20 @@ src/edge_analyst/
   indicators.py     SMA / EMA / MACD / RSI — pure functions, no LLM
   gate.py           materiality gate: crossing + level rules, OR-combined
   snapshot.py       glues fetch -> indicators -> gate into one TickerSnapshot
-  store.py          SQLite persistence (bars, fundamentals, decisions, debate_turns)
+  store.py          SQLite persistence (bars, fundamentals, decisions + eval tables)
   pipeline.py       the orchestrator: snapshot -> persist -> gate -> LLM cascade
   llm_client.py     thin HTTP client for llama-server's OpenAI-compatible API
   llm_parsing.py    shared forgiving sentinel-field parser
   news_analyst.py   Phase 3: quick-tier news/sentiment analyst
   debate.py         Phase 4: bull/bear debate + trader synthesis
+eval/
+  checks.py         Tier 0: deterministic per-response checks, no LLM
+  fixtures/         synthetic adversarial fixtures (one YAML per failure mode)
+  run_fixtures.py   Tier 0 runner: fixtures x k samples -> eval_runs/eval_samples
+  report.py         scorecards, A-vs-B comparison, judge + pairwise summaries
+  rubric.py         Tier 1: per-criterion and pairwise judge prompts/parsers
+  modal_app.py      Tier 1 on Modal: batched vLLM judging on an L40S
+  calibrate.py      Tier 2: hand-labelling + Cohen's kappa against the judge
 tests/              unit + smoke tests (design-decision regressions)
 deploy/             pull-based Jetson deploy: systemd service + timer, deploy.sh
 config/watchlist.yaml
@@ -79,6 +87,11 @@ some `base_url`, e.g. on the Jetson:
 
 uv run python -m edge_analyst.pipeline AAPL http://localhost:8080          # single ticker, live cascade
 uv run python -m edge_analyst.pipeline AAPL http://localhost:8080 --force  # demo the cascade even on a quiet gate
+
+# The optional third arg labels which model produced the decision. Without it the
+# row records `unknown`, and an unattributed decision can't be compared to another
+# model's later — see "Evaluating a model" below.
+uv run python -m edge_analyst.pipeline NVDA http://localhost:8081 olmoe-1b-7b
 ```
 
 News is auto-fetched (bounded, pre-summarized via yfinance) when the gate is
@@ -86,6 +99,88 @@ material and a `base_url` is given. `run_cycle` prints the gate outcome plus, wh
 the cascade runs, the parsed `SentimentSignal`, `DebateState`, and `TraderDecision`
 — and persists the news digest and every LLM output to SQLite (`decisions` /
 `debate_turns` tables) alongside the deterministic bars/fundamentals.
+
+## Evaluating a model
+
+The question the harness exists to answer is "is model A better than model B on
+this cascade", and answering it needs ground truth, attribution, and a measured
+noise floor. Three tiers, cheapest first:
+
+| Tier | What | Where | Cost | Cadence |
+|---|---|---|---|---|
+| 0 | Deterministic checks, no judge | Jetson / CI | free | every run |
+| 1 | LLM-as-judge: per-criterion + pairwise | Modal L40S | GPU-minutes | per bake-off |
+| 2 | Human calibration set + Cohen's kappa | local, manual | your time | on judge change |
+
+```bash
+make eval-fixtures MODEL=gemma-3-1b-it BASE_URL=http://localhost:8080   # Tier 0
+make eval-report RUN=latest
+make eval-compare A=baseline B=<run_id>
+
+make eval-judge                                    # Tier 1, per-criterion
+make eval-pairwise A=gemma-3-1b-it B=olmoe-1b-7b   # Tier 1, A-vs-B
+
+make eval-calibrate CMD="label --n 40"             # Tier 2, hand-label (resumable)
+make eval-calibrate CMD=score                      # Tier 2, kappa vs the judge
+```
+
+The eval targets are not in CI: it has no GPU and no `llama-server`. Everything
+model-independent — the checks, the fixture loader, the aggregation, and the
+recorded-response replay — does run in `make check`.
+
+### Two input sets, never averaged together
+
+- **Synthetic fixtures** (`eval/fixtures/synthetic/*.yaml`) are hand-built and
+  adversarial, with a known-correct answer. They give hard pass/fail regression
+  gates. Their tickers are always synthetic (`TESTA`…`TESTD`) and they never write
+  to the `decisions` table.
+- **Replayed real days** (the `decisions` table) are real yfinance indicators and
+  news. They have **no** ground truth, so they are only used for Tier 1 pairwise
+  model-vs-model comparison.
+
+Averaging the two produces a number that answers neither question: a synthetic
+score measures "does this model handle this specific adversarial situation", a
+replayed score measures "which model is better on real data". Keep them apart.
+
+### Reading the output honestly
+
+Three numbers decide whether a result is a result at all:
+
+- **fallback rate per sentinel field.** The forgiving parsers return
+  `neutral / 5.0 / low` on unparseable output, so a broken model scores as
+  *mediocre* unless you look here first. `SentimentSignal.fallbacks` and friends
+  record which fields defaulted.
+- **`judge_parse_failure_rate`** (Tier 1). A high rate means the run is
+  **invalid**, not low-scoring. Nothing is ever imputed — an unparseable judge
+  response is `None`, and `derived_score` is `yes / answered`.
+- **`order_flip_rate`** (Tier 1 pairwise). Every pair is judged in both display
+  orders; the fraction whose winner changes is the judge's own noise floor. A
+  win-rate margin smaller than it is not a result, and `eval.report` refuses to
+  name a winner inside it.
+
+Tier 1 also warns when the judge and the model under test share a family
+(`rubric.same_family`) — Qwen2.5-32B scoring Qwen3-30B-A3B output is
+self-preference risk. `--second-judge` runs a different family and reports
+inter-judge agreement.
+
+Tier 2 is what makes Tiers 0–1 falsifiable: without it, a judge that answers
+"yes" to everything and a genuinely good cascade produce the same scorecard.
+`make eval-calibrate CMD=score` reports **Cohen's kappa** per criterion between
+your labels and the judge's — kappa rather than raw agreement, because raw
+agreement is inflated by the base rate (on a criterion where 90% of records are
+truly "yes", a yes-to-everything judge scores 90% and has learned nothing).
+
+Kappa below 0.4 on a criterion means **the rubric wording is broken, not the
+cascade**: fix `CRITERIA[criterion]` in `eval/rubric.py` and re-judge before
+drawing any conclusion about a model. Re-run `score` whenever the judge model or
+any criterion prompt changes — a rubric edit invalidates the previous kappa.
+
+The committed comparison floor is `eval/results/baseline.json`; see
+[`eval/results/README.md`](eval/results/README.md) for how to produce it and
+[`tests/fixtures/responses/README.md`](tests/fixtures/responses/README.md) for
+capturing real model output as CI regression fixtures. Both must come from a real
+device run — invented numbers would make every later comparison look rigorous
+while measuring a fiction.
 
 ## Deploying to the Jetson
 

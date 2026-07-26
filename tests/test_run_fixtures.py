@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 
+import yaml
 from eval import run_fixtures
 from eval.fixtures import Expectation, Fixture
 
@@ -270,6 +271,67 @@ def test_run_id_is_a_timestamp_plus_model_slug():
         "OLMoE-1B-7B q4_K_M", dt.datetime(2026, 7, 26, 9, 5)
     )
     assert run_id == "20260726T090500__olmoe-1b-7b-q4-k-m"
+
+
+def test_export_fixtures_writes_raw_text_and_a_sidecar(tmp_path):
+    export = tmp_path / "responses"
+    _run(tmp_path, stage="sentiment", k=1, export_dir=export)
+
+    captured = export / "test-model__probe__0.txt"
+    assert captured.read_text(encoding="utf-8") == _GOOD_SENTIMENT
+
+    sidecar = yaml.safe_load((export / "expected.yaml").read_text())
+    entry = sidecar["test-model__probe__0.txt"]
+    assert entry["fixture_id"] == "probe"
+    assert entry["stage"] == "sentiment"
+    assert entry["finish_reason"] == "stop"
+    assert entry["fallbacks"] == []
+    assert entry["checks"]["fields_parsed"] is True
+
+
+def test_export_fixtures_merges_across_models(tmp_path):
+    """A capture directory accumulates: each model's output on the same fixture
+    is a distinct regression case, not a replacement for the last one."""
+    export = tmp_path / "responses"
+    _run(tmp_path, stage="sentiment", k=1, export_dir=export, run_id="R1")
+    _run(
+        tmp_path,
+        stage="sentiment",
+        k=1,
+        export_dir=export,
+        run_id="R2",
+        model_name="other-model",
+    )
+
+    sidecar = yaml.safe_load((export / "expected.yaml").read_text())
+    assert set(sidecar) == {"test-model__probe__0.txt", "other-model__probe__0.txt"}
+
+
+def test_exported_capture_replays_to_the_same_verdicts(tmp_path):
+    """The round trip the CI replay test depends on: a captured response, scored
+    again from disk, must produce exactly the recorded fallbacks and checks."""
+    export = tmp_path / "responses"
+    bad = {**_ALL_GOOD, "sentiment": "I cannot help with that."}
+    _run(
+        tmp_path, stage="sentiment", k=1, export_dir=export, completion_fn=_canned(bad)
+    )
+
+    entry = yaml.safe_load((export / "expected.yaml").read_text())[
+        "test-model__probe__0.txt"
+    ]
+    raw = (export / "test-model__probe__0.txt").read_text(encoding="utf-8")
+
+    replayed = run_fixtures.score_sample(
+        _FIXTURE,
+        entry["stage"],
+        0,
+        run_fixtures.build_prompt(_FIXTURE, entry["stage"]),
+        _completion(raw, entry["finish_reason"]),
+    )
+    assert sorted(replayed.fallbacks) == entry["fallbacks"]
+    assert {c.name: c.passed for c in replayed.checks} == entry["checks"]
+    # And it really is a malformed capture — the kind worth committing.
+    assert entry["fallbacks"] == ["CONFIDENCE", "LABEL", "RATIONALE", "SCORE"]
 
 
 def test_runner_does_not_import_data_source():
