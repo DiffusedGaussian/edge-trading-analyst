@@ -389,6 +389,149 @@ def _ran_pairs(report: dict) -> set[tuple[str, str, str]]:
     return pairs
 
 
+# --- Tier 1: judge reporting -------------------------------------------------
+
+
+def criterion_scores(verdicts: list[dict]) -> dict[str, dict]:
+    """Per criterion: derived_score and parse_failure_rate, reported separately
+    and never blended.
+
+    derived_score is yes/answered, replacing the judge's own OVERALL_SCORE — an
+    LLM's absolute 0-10 clusters at 7-8 and carries almost no resolution. The
+    parse-failure rate sits beside it because a run where the judge often failed
+    to answer is not a low-scoring run, it is an invalid one, and only the two
+    numbers together distinguish those.
+    """
+    by_criterion: dict[str, list[dict]] = {}
+    for row in verdicts:
+        by_criterion.setdefault(row["criterion"], []).append(row)
+
+    scores = {}
+    for criterion, rows in sorted(by_criterion.items()):
+        answered = [r for r in rows if r["verdict"] is not None]
+        yes = sum(1 for r in answered if r["verdict"] == "yes")
+        scores[criterion] = {
+            "derived_score": _rate(yes, len(answered)),
+            "yes": yes,
+            "answered": len(answered),
+            "judged": len(rows),
+            "parse_failure_rate": _rate(len(rows) - len(answered), len(rows)),
+        }
+    return scores
+
+
+def render_criterion_scores(
+    verdicts: list[dict], model: str = "", judge_model: str = ""
+) -> str:
+    from eval.rubric import same_family
+
+    lines = [f"judge {judge_model or '?'}   model {model or '(mixed)'}"]
+    if model and judge_model and same_family(model, judge_model):
+        lines.append(
+            f"  WARNING: {model} and {judge_model} look like the same model "
+            "family — these verdicts are self-preference-prone; re-run with "
+            "--second-judge from another family before trusting them"
+        )
+    scores = criterion_scores(verdicts)
+    if not scores:
+        return "\n".join(lines + ["  no verdicts recorded"])
+
+    lines.append(f"  {'criterion':<24}{'derived':>8}{'yes/ans':>10}{'parse-fail':>12}")
+    for criterion, data in scores.items():
+        derived = (
+            "n/a" if data["derived_score"] is None else f"{data['derived_score']:.2f}"
+        )
+        lines.append(
+            f"  {criterion:<24}{derived:>8}"
+            f"{f'{data["yes"]}/{data["answered"]}':>10}"
+            f"{render_rate(data['parse_failure_rate']):>12}"
+        )
+    worst = max((d["parse_failure_rate"] or 0.0) for d in scores.values())
+    if worst >= 0.2:
+        lines.append(
+            f"  a criterion failed to parse {worst:.0%} of the time — treat this "
+            "run as invalid, not as a low score, and fix CRITERIA[...] first"
+        )
+    return "\n".join(lines)
+
+
+def pairwise_summary(rows: list[dict]) -> dict:
+    """Win rates after de-duplicating display order, plus the order_flip_rate.
+
+    order_flip_rate is the headline: it is the judge's measured noise floor. Any
+    win-rate gap smaller than it is not a result, however clean the table looks.
+    """
+    by_pair: dict[tuple, dict[str, str | None]] = {}
+    for row in rows:
+        key = (row["ticker"], row["as_of_a"], row["as_of_b"], row["criterion"])
+        by_pair.setdefault(key, {})[row["order_shown"]] = row["winner"]
+
+    wins_a = wins_b = ties = flips = comparable = unparsed = 0
+    for orders in by_pair.values():
+        winners = [orders.get(order) for order in ("ab", "ba")]
+        if any(w is None for w in winners):
+            unparsed += 1
+            continue
+        comparable += 1
+        if winners[0] != winners[1]:
+            flips += 1
+            continue
+        # Both orders agree, so this pair has a real winner.
+        if winners[0] == "model_a":
+            wins_a += 1
+        elif winners[0] == "model_b":
+            wins_b += 1
+        else:
+            ties += 1
+
+    decided = wins_a + wins_b
+    return {
+        "pairs": len(by_pair),
+        "comparable": comparable,
+        "unparsed_pairs": unparsed,
+        "wins_a": wins_a,
+        "wins_b": wins_b,
+        "ties": ties,
+        "win_rate_a": _rate(wins_a, decided),
+        "order_flip_rate": _rate(flips, comparable),
+    }
+
+
+def render_pairwise(rows: list[dict], model_a: str, model_b: str) -> str:
+    summary = pairwise_summary(rows)
+    flip = summary["order_flip_rate"]
+    win_rate = summary["win_rate_a"]
+    lines = [
+        f"\nA = {model_a}   B = {model_b}",
+        f"  pairs judged        {summary['pairs']} "
+        f"({summary['unparsed_pairs']} unparsable in at least one order)",
+        f"  A wins              {summary['wins_a']}",
+        f"  B wins              {summary['wins_b']}",
+        f"  ties                {summary['ties']}",
+        f"  win_rate_a          {render_rate(win_rate)} "
+        "(order-consistent decisions only)",
+        f"  order_flip_rate     {render_rate(flip)}   <-- the judge's noise floor",
+    ]
+    if win_rate is None or flip is None:
+        lines.append(
+            "  not enough order-consistent verdicts to call a winner either way"
+        )
+    else:
+        margin = abs(win_rate - 0.5) * 2
+        if margin <= flip:
+            lines.append(
+                f"  VERDICT: no result. The A-vs-B margin ({margin:.0%}) is within "
+                f"the judge's own order-flip noise ({flip:.0%})."
+            )
+        else:
+            leader = model_a if win_rate > 0.5 else model_b
+            lines.append(
+                f"  VERDICT: {leader} leads by {margin:.0%}, outside the "
+                f"{flip:.0%} order-flip noise floor."
+            )
+    return "\n".join(lines)
+
+
 # --- entrypoint --------------------------------------------------------------
 
 
@@ -407,9 +550,47 @@ def main(argv: list[str] | None = None) -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--run", help="run_id to summarise ('latest' for the newest)")
     group.add_argument("--compare", nargs=2, metavar=("RUN_A", "RUN_B"))
+    group.add_argument(
+        "--judge",
+        action="store_true",
+        help="Tier 1: per-criterion derived scores from criterion_verdicts",
+    )
+    group.add_argument(
+        "--pairwise",
+        nargs=2,
+        metavar=("MODEL_A", "MODEL_B"),
+        help="Tier 1: pairwise win rate and order-flip noise floor",
+    )
     parser.add_argument("--db", default="data/edge_analyst.db")
+    parser.add_argument("--model", default="", help="filter Tier 1 output to a model")
+    parser.add_argument("--judge-model", default="", help="filter to one judge")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
+
+    if args.judge:
+        conn = store.get_connection(args.db)
+        verdicts = store.fetch_criterion_verdicts(
+            conn, judge_model=args.judge_model or None, model=args.model or None
+        )
+        conn.close()
+        if args.json:
+            print(json.dumps(criterion_scores(verdicts), indent=2))
+        else:
+            print(render_criterion_scores(verdicts, args.model, args.judge_model))
+        return
+
+    if args.pairwise:
+        model_a, model_b = args.pairwise
+        conn = store.get_connection(args.db)
+        rows = store.fetch_pairwise_results(
+            conn, model_a, model_b, args.judge_model or None
+        )
+        conn.close()
+        if args.json:
+            print(json.dumps(pairwise_summary(rows), indent=2))
+        else:
+            print(render_pairwise(rows, model_a, model_b))
+        return
 
     if args.run:
         run_id = args.run

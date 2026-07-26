@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS eval_samples (
 
 -- Judge output over a (ticker, as_of) decision. Keyed on judge_model too, so
 -- re-judging with a different/bigger model doesn't clobber a prior judgment.
+-- Superseded by criterion_verdicts (one row per criterion, no imputed score),
+-- but deliberately left in place with its rows: it holds the first judged batch.
 CREATE TABLE IF NOT EXISTS judgments (
     ticker TEXT NOT NULL,
     as_of TEXT NOT NULL,
@@ -101,6 +103,26 @@ CREATE TABLE IF NOT EXISTS judgments (
     overall_score REAL, notes TEXT,
     judged_at TEXT,
     PRIMARY KEY (ticker, as_of, judge_model)
+);
+
+-- One row per (decision, judge, criterion). `verdict` is NULL when the judge's
+-- response was unparseable — that is a fact worth storing, and the reason this
+-- table exists rather than a wider one: a NULL here cannot be silently averaged
+-- as a middling score the way an imputed 5.0 was.
+CREATE TABLE IF NOT EXISTS criterion_verdicts (
+    ticker TEXT, as_of TEXT, model TEXT, judge_model TEXT,
+    criterion TEXT, verdict TEXT, reason TEXT, judged_at TEXT,
+    PRIMARY KEY (ticker, as_of, model, judge_model, criterion)
+);
+
+-- Pairwise comparisons. order_shown is in the PK because the same pair MUST be
+-- judged both ways: the disagreement rate between the two orders is the judge's
+-- own noise floor, and storing only one order throws that measurement away.
+CREATE TABLE IF NOT EXISTS pairwise_results (
+    ticker TEXT, as_of_a TEXT, as_of_b TEXT,
+    model_a TEXT, model_b TEXT, judge_model TEXT,
+    criterion TEXT, order_shown TEXT, winner TEXT, reason TEXT, judged_at TEXT,
+    PRIMARY KEY (ticker, as_of_a, as_of_b, judge_model, criterion, order_shown)
 );
 """
 
@@ -524,3 +546,96 @@ def save_judgment(
         ),
     )
     conn.commit()
+
+
+_CRITERION_COLUMNS = [
+    "ticker",
+    "as_of",
+    "model",
+    "judge_model",
+    "criterion",
+    "verdict",
+    "reason",
+    "judged_at",
+]
+
+
+def save_criterion_verdicts(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """One row per (decision, judge, criterion). A NULL `verdict` means the
+    judge's response was unparseable and is stored as such — see the table
+    comment for why that must not become a default."""
+    conn.executemany(
+        f"""INSERT OR REPLACE INTO criterion_verdicts
+            ({", ".join(_CRITERION_COLUMNS)})
+            VALUES ({", ".join("?" * len(_CRITERION_COLUMNS))})""",
+        [tuple(row.get(column) for column in _CRITERION_COLUMNS) for row in rows],
+    )
+    conn.commit()
+
+
+def fetch_criterion_verdicts(
+    conn: sqlite3.Connection, judge_model: str | None = None, model: str | None = None
+) -> list[dict]:
+    where, params = [], []
+    if judge_model is not None:
+        where.append("judge_model = ?")
+        params.append(judge_model)
+    if model is not None:
+        where.append("model = ?")
+        params.append(model)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"""SELECT {", ".join(_CRITERION_COLUMNS)} FROM criterion_verdicts
+            {clause} ORDER BY ticker, as_of, criterion""",
+        tuple(params),
+    ).fetchall()
+    return [dict(zip(_CRITERION_COLUMNS, row, strict=True)) for row in rows]
+
+
+_PAIRWISE_COLUMNS = [
+    "ticker",
+    "as_of_a",
+    "as_of_b",
+    "model_a",
+    "model_b",
+    "judge_model",
+    "criterion",
+    "order_shown",
+    "winner",
+    "reason",
+    "judged_at",
+]
+
+
+def save_pairwise_results(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    conn.executemany(
+        f"""INSERT OR REPLACE INTO pairwise_results
+            ({", ".join(_PAIRWISE_COLUMNS)})
+            VALUES ({", ".join("?" * len(_PAIRWISE_COLUMNS))})""",
+        [tuple(row.get(column) for column in _PAIRWISE_COLUMNS) for row in rows],
+    )
+    conn.commit()
+
+
+def fetch_pairwise_results(
+    conn: sqlite3.Connection,
+    model_a: str | None = None,
+    model_b: str | None = None,
+    judge_model: str | None = None,
+) -> list[dict]:
+    where, params = [], []
+    for column, value in (
+        ("model_a", model_a),
+        ("model_b", model_b),
+        ("judge_model", judge_model),
+    ):
+        if value is not None:
+            where.append(f"{column} = ?")
+            params.append(value)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"""SELECT {", ".join(_PAIRWISE_COLUMNS)} FROM pairwise_results
+            {clause} ORDER BY ticker, as_of_a, criterion, order_shown""",
+        tuple(params),
+    ).fetchall()
+    return [dict(zip(_PAIRWISE_COLUMNS, row, strict=True)) for row in rows]

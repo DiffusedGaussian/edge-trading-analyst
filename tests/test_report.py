@@ -14,11 +14,15 @@ from eval.report import (
     Stat,
     build_report,
     check_pass_rates,
+    criterion_scores,
     fallback_rates,
     hard_failures,
     label_flip_rates,
+    pairwise_summary,
     regressed_checks,
     render_comparison,
+    render_criterion_scores,
+    render_pairwise,
     render_rate,
     render_run,
     summarise,
@@ -324,3 +328,143 @@ def test_render_comparison_warns_when_the_two_runs_used_different_settings():
 def test_render_comparison_of_two_empty_runs_does_not_raise():
     empty = build_report(_RUN, [])
     assert "no check regressed" in render_comparison(empty, empty)
+
+
+# --- Tier 1: judge scores ---------------------------------------------------
+
+
+def _verdict(criterion="news_fidelity", verdict="yes"):
+    return {
+        "ticker": "AAPL",
+        "as_of": "2026-07-24T10:00:00",
+        "model": "gemma-3-1b-it",
+        "judge_model": "Qwen/Qwen2.5-32B-Instruct",
+        "criterion": criterion,
+        "verdict": verdict,
+        "reason": "because",
+    }
+
+
+def test_derived_score_is_yes_over_answered_not_over_judged():
+    """An unanswered criterion must shrink the denominator, not count as a no —
+    otherwise a judge that fails to parse looks like a failing model."""
+    verdicts = [
+        _verdict(verdict="yes"),
+        _verdict(verdict="no"),
+        _verdict(verdict=None),
+    ]
+    scores = criterion_scores(verdicts)["news_fidelity"]
+    assert scores["derived_score"] == 0.5
+    assert scores["answered"] == 2
+    assert scores["judged"] == 3
+
+
+def test_parse_failure_rate_is_reported_separately_from_the_score():
+    verdicts = [_verdict(verdict="yes"), _verdict(verdict=None)]
+    scores = criterion_scores(verdicts)["news_fidelity"]
+    assert scores["derived_score"] == 1.0
+    assert scores["parse_failure_rate"] == 0.5
+
+
+def test_derived_score_of_an_all_unparsed_criterion_is_unknown():
+    """Not 0.0 — nothing was measured. This is the distinction the whole
+    no-imputation rule exists to preserve."""
+    scores = criterion_scores([_verdict(verdict=None)])["news_fidelity"]
+    assert scores["derived_score"] is None
+    assert scores["parse_failure_rate"] == 1.0
+
+
+def test_render_criterion_scores_handles_no_verdicts():
+    assert "no verdicts recorded" in render_criterion_scores([])
+
+
+def test_render_criterion_scores_calls_a_high_parse_failure_run_invalid():
+    verdicts = [_verdict(verdict=None), _verdict(verdict="yes")]
+    text = render_criterion_scores(verdicts, "gemma-3-1b-it", "Qwen/Qwen2.5-32B")
+    assert "invalid" in text
+
+
+def test_render_criterion_scores_warns_on_a_same_family_judge():
+    text = render_criterion_scores(
+        [_verdict()], "Qwen3-30B-A3B", "Qwen/Qwen2.5-32B-Instruct"
+    )
+    assert "WARNING" in text
+    assert "self-preference" in text
+
+
+def test_render_criterion_scores_does_not_warn_across_families():
+    text = render_criterion_scores(
+        [_verdict()], "olmoe-1b-7b", "Qwen/Qwen2.5-32B-Instruct"
+    )
+    assert "WARNING" not in text
+
+
+# --- Tier 1: pairwise -------------------------------------------------------
+
+
+def _pair_rows(ticker, criterion, winner_ab, winner_ba):
+    base = {
+        "ticker": ticker,
+        "as_of_a": "2026-07-24T10:00:00",
+        "as_of_b": "2026-07-24T14:00:00",
+        "model_a": "model-a",
+        "model_b": "model-b",
+        "judge_model": "judge",
+        "criterion": criterion,
+        "reason": "because",
+    }
+    return [
+        {**base, "order_shown": "ab", "winner": winner_ab},
+        {**base, "order_shown": "ba", "winner": winner_ba},
+    ]
+
+
+def test_pairwise_counts_a_win_only_when_both_orders_agree():
+    rows = _pair_rows("AAPL", "news_fidelity", "model_a", "model_a")
+    summary = pairwise_summary(rows)
+    assert summary["wins_a"] == 1
+    assert summary["order_flip_rate"] == 0.0
+    assert summary["win_rate_a"] == 1.0
+
+
+def test_pairwise_treats_an_order_disagreement_as_a_flip_not_a_win():
+    """The judge picked whichever record it saw first. That is noise, and
+    counting it as a win for either side is how a bake-off invents a result."""
+    rows = _pair_rows("AAPL", "news_fidelity", "model_a", "model_b")
+    summary = pairwise_summary(rows)
+    assert summary["order_flip_rate"] == 1.0
+    assert summary["wins_a"] == summary["wins_b"] == 0
+    assert summary["win_rate_a"] is None
+
+
+def test_pairwise_excludes_pairs_unparsable_in_either_order():
+    rows = _pair_rows("AAPL", "news_fidelity", "model_a", None)
+    summary = pairwise_summary(rows)
+    assert summary["unparsed_pairs"] == 1
+    assert summary["comparable"] == 0
+    assert summary["order_flip_rate"] is None
+
+
+def test_render_pairwise_refuses_to_call_a_winner_inside_the_noise_floor():
+    """A margin smaller than the judge's own order-flip rate is not a result,
+    however clean the win/loss table looks."""
+    rows = (
+        _pair_rows("AAPL", "news_fidelity", "model_a", "model_a")
+        + _pair_rows("MSFT", "news_fidelity", "model_b", "model_b")
+        + _pair_rows("NVDA", "news_fidelity", "model_a", "model_b")
+    )
+    text = render_pairwise(rows, "model-a", "model-b")
+    assert "no result" in text
+    assert "order_flip_rate" in text
+
+
+def test_render_pairwise_calls_a_winner_outside_the_noise_floor():
+    rows = []
+    for ticker in ("AAPL", "MSFT", "NVDA", "TSLA"):
+        rows += _pair_rows(ticker, "news_fidelity", "model_a", "model_a")
+    text = render_pairwise(rows, "model-a", "model-b")
+    assert "model-a leads" in text
+
+
+def test_render_pairwise_of_nothing_does_not_raise():
+    assert "not enough" in render_pairwise([], "model-a", "model-b")
