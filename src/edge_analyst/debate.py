@@ -7,9 +7,15 @@ keeping the round-to-round rebuttal fully intact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .indicators import format_market_context
 from .llm_parsing import extract_field
+
+if TYPE_CHECKING:
+    # Type-only: llm_client stays a per-call local import in this module (the
+    # functions below), which is what lets tests patch the HTTP boundary.
+    from .llm_client import GenSettings
 
 _STANCES = {"buy", "hold", "sell"}
 _CONFIDENCES = {"low", "medium", "high"}
@@ -121,6 +127,7 @@ def run_debate(
     news_text: str,
     base_url: str,
     max_rounds: int = 2,
+    settings: GenSettings | None = None,
 ) -> tuple[DebateState, list[DebateState]]:
     """Returns (final_state, history) — history has one entry per round
     actually run, so callers can persist the full debate, not just the
@@ -142,7 +149,7 @@ def run_debate(
             bear_key_point,
         )
         bull_turn = parse_debate_response(
-            chat_completion(bull_messages, base_url=base_url)
+            chat_completion(bull_messages, base_url=base_url, settings=settings)
         )
 
         bear_messages = build_debate_prompt(
@@ -156,7 +163,7 @@ def run_debate(
             bull_turn.key_point,
         )
         bear_turn = parse_debate_response(
-            chat_completion(bear_messages, base_url=base_url)
+            chat_completion(bear_messages, base_url=base_url, settings=settings)
         )
 
         state = DebateState(round=round_num, bull=bull_turn, bear=bear_turn)
@@ -273,10 +280,13 @@ def run_trader(
     fired_reasons: list[str],
     state: DebateState,
     base_url: str,
+    settings: GenSettings | None = None,
 ) -> TraderDecision:
     from .llm_client import chat_completion
 
     messages = build_trader_prompt(
         ticker, close, rsi_value, macd_hist, fired_reasons, state
     )
-    return parse_trader_response(chat_completion(messages, base_url=base_url))
+    return parse_trader_response(
+        chat_completion(messages, base_url=base_url, settings=settings)
+    )

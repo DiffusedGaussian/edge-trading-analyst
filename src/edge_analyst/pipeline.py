@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from . import data_source, store
 from .config import Config, load_config
 from .debate import DebateState, TraderDecision, run_debate, run_trader
-from .llm_client import chat_completion
+from .llm_client import GenSettings, chat_completion
 from .news_analyst import (
     SentimentSignal,
     build_sentiment_prompt,
@@ -44,6 +44,7 @@ def run_cycle(
     base_url: str | None = None,
     force: bool = False,
     model_name: str = "unknown",
+    settings: GenSettings | None = None,
 ) -> CycleResult:
     """`force=True` runs the LLM cascade even on a quiet gate — for
     testing/demoing the full chain on a day nothing triggers. The real gate
@@ -78,7 +79,7 @@ def run_cycle(
         ticker, snapshot.close, snapshot.rsi, snapshot.macd_hist, reasons, news_text
     )
     sentiment = parse_sentiment_response(
-        chat_completion(analyst_messages, base_url=base_url)
+        chat_completion(analyst_messages, base_url=base_url, settings=settings)
     )
 
     # NOTE: how the debate should consume large/multi-article news vs. the
@@ -92,6 +93,7 @@ def run_cycle(
         reasons,
         news_text,
         base_url,
+        settings=settings,
     )
 
     trader = run_trader(
@@ -102,6 +104,7 @@ def run_cycle(
         reasons,
         debate,
         base_url,
+        settings=settings,
     )
 
     # Finer-grained than fundamentals' date-only as_of: a --force demo run can
