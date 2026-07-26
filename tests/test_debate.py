@@ -141,6 +141,52 @@ def test_run_debate_runs_to_max_rounds_on_standoff(monkeypatch):
     assert final.round == 2
 
 
+def test_debate_turn_fallbacks_empty_on_well_formed_output():
+    turn = parse_debate_response("STANCE: Buy\nKEY_POINT: a fact\nCONFIDENCE: high")
+    assert turn.fallbacks == frozenset()
+
+
+def test_debate_turn_fallbacks_names_every_defaulted_field():
+    turn = parse_debate_response("unparseable prose")
+    assert turn.fallbacks == frozenset({"STANCE", "KEY_POINT", "CONFIDENCE"})
+
+
+def test_trader_fallbacks_empty_on_well_formed_output():
+    text = (
+        "ACTION: Buy\nREASONING: strong momentum.\n"
+        "ENTRY_PRICE: 150.5\nSTOP_LOSS: 140.0\nPOSITION_SIZING: 5"
+    )
+    assert parse_trader_response(text).fallbacks == frozenset()
+
+
+def test_trader_na_is_parsed_not_a_fallback():
+    """NA is the *correct* answer on a Hold — it must not be counted as a
+    format failure, or every Hold would look like a broken model."""
+    text = (
+        "ACTION: Hold\nREASONING: mixed signals.\n"
+        "ENTRY_PRICE: NA\nSTOP_LOSS: NA\nPOSITION_SIZING: NA"
+    )
+    decision = parse_trader_response(text)
+    assert decision.entry_price is None
+    assert decision.fallbacks == frozenset()
+
+
+def test_trader_missing_and_garbage_numbers_are_fallbacks():
+    text = "ACTION: Buy\nREASONING: strong.\nENTRY_PRICE: about a hundred"
+    decision = parse_trader_response(text)
+    assert decision.entry_price is None
+    assert decision.fallbacks == frozenset(
+        {"ENTRY_PRICE", "STOP_LOSS", "POSITION_SIZING"}
+    )
+
+
+def test_trader_fallbacks_names_every_defaulted_field():
+    decision = parse_trader_response("unparseable prose")
+    assert decision.fallbacks == frozenset(
+        {"ACTION", "REASONING", "ENTRY_PRICE", "STOP_LOSS", "POSITION_SIZING"}
+    )
+
+
 def test_run_trader_parses_final_decision(monkeypatch):
     _mock_replies(
         monkeypatch,

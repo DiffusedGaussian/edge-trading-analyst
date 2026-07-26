@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from . import data_source, store
 from .config import Config, load_config
 from .debate import DebateState, TraderDecision, run_debate, run_trader
-from .llm_client import chat_completion
+from .llm_client import GenSettings, chat_completion
 from .news_analyst import (
     SentimentSignal,
     build_sentiment_prompt,
@@ -43,10 +43,17 @@ def run_cycle(
     news_text: str | None = None,
     base_url: str | None = None,
     force: bool = False,
+    model_name: str = "unknown",
+    settings: GenSettings | None = None,
 ) -> CycleResult:
     """`force=True` runs the LLM cascade even on a quiet gate — for
     testing/demoing the full chain on a day nothing triggers. The real gate
-    result is still recorded on the snapshot; force only bypasses the early exit."""
+    result is still recorded on the snapshot; force only bypasses the early exit.
+
+    `model_name` is recorded on the persisted decision. llama-server doesn't
+    reliably report which GGUF it loaded, so this is caller-supplied: it's the
+    operator's label for the model behind `base_url`, and the only thing that
+    makes a decision attributable to a model later."""
     snapshot = analyze_ticker(ticker, lookback_days)
     if not snapshot.has_data:
         return CycleResult(snapshot=snapshot)
@@ -72,7 +79,7 @@ def run_cycle(
         ticker, snapshot.close, snapshot.rsi, snapshot.macd_hist, reasons, news_text
     )
     sentiment = parse_sentiment_response(
-        chat_completion(analyst_messages, base_url=base_url)
+        chat_completion(analyst_messages, base_url=base_url, settings=settings)
     )
 
     # NOTE: how the debate should consume large/multi-article news vs. the
@@ -86,6 +93,7 @@ def run_cycle(
         reasons,
         news_text,
         base_url,
+        settings=settings,
     )
 
     trader = run_trader(
@@ -96,13 +104,16 @@ def run_cycle(
         reasons,
         debate,
         base_url,
+        settings=settings,
     )
 
     # Finer-grained than fundamentals' date-only as_of: a --force demo run can
     # fire more than once a day for the same ticker, and date-only would
     # silently overwrite the earlier decision instead of recording both.
     as_of = dt.datetime.now().isoformat(timespec="seconds")
-    store.save_decision(
+    # save_decision may suffix as_of to avoid clobbering another model's row for
+    # the same ticker-second; the debate turns must be keyed on what it wrote.
+    as_of = store.save_decision(
         conn,
         ticker,
         as_of,
@@ -113,8 +124,9 @@ def run_cycle(
         news_text,
         sentiment,
         trader,
+        model_name,
     )
-    store.save_debate_turns(conn, ticker, as_of, debate_history)
+    store.save_debate_turns(conn, ticker, as_of, debate_history, model_name)
 
     return CycleResult(
         snapshot=snapshot,
@@ -163,17 +175,25 @@ if __name__ == "__main__":
     import sys
 
     # No args -> batch watchlist (deterministic only, no news source).
-    # TICKER [base_url] [--force] -> single ticker, full live cascade with
-    #   auto-fetched news. --force runs the cascade even on a quiet gate.
+    # TICKER [base_url] [model_name] [--force] -> single ticker, full live
+    #   cascade with auto-fetched news. --force runs the cascade even on a quiet
+    #   gate. model_name is the label recorded on the decision row, e.g.
+    #   `python -m edge_analyst.pipeline NVDA http://localhost:8081 olmoe-1b-7b`
     args = [a for a in sys.argv[1:] if a != "--force"]
     force = "--force" in sys.argv
     if args:
         ticker = args[0]
         base_url = args[1] if len(args) > 1 else "http://localhost:8080"
+        model_name = args[2] if len(args) > 2 else "unknown"
         config = load_config()
         conn = store.get_connection()
         result = run_cycle(
-            conn, ticker, config.lookback_days, base_url=base_url, force=force
+            conn,
+            ticker,
+            config.lookback_days,
+            base_url=base_url,
+            force=force,
+            model_name=model_name,
         )
         conn.close()
         _print_cycle(ticker, result)
