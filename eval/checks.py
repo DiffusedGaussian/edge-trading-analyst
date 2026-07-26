@@ -369,9 +369,34 @@ _MAX_LINE_REPEATS = 3
 _ECHO_WINDOW = 40
 
 
+def _strip_sentinel_prefixes(text: str) -> str:
+    """Removes the `FIELD:` prefix from each line, keeping the value.
+
+    Required before the echo scan. The system prompts contain both the required
+    format and a worked example, so a model that correctly answers
+    `LABEL: bullish / SCORE: 7 / CONFIDENCE: high` reproduces 40+ characters of
+    its own prompt verbatim — that is compliance, not degeneracy. Dropping the
+    prefixes collapses the scaffold to `bullish / 7 / high` while leaving the
+    prose values intact, so a model that copies the worked example's *rationale*
+    is still caught.
+    """
+    return "\n".join(
+        re.sub(
+            rf"^\s*(?:{'|'.join(SENTINEL_NAMES)}):\s*", "", line, flags=re.IGNORECASE
+        )
+        for line in text.splitlines()
+    )
+
+
 def check_not_degenerate(raw_output: str, prompt_text: str) -> CheckResult:
     """Catches the three ways a small model fails to produce anything at all:
-    silence, a repetition loop, and parroting its own prompt back."""
+    silence, a repetition loop, and parroting its own prompt back.
+
+    `prompt_text` should be the *instruction* text (the system prompt), not the
+    whole rendered prompt — run_all_checks passes prompt_boilerplate. Quoting the
+    news back is grounding, which check_news_grounding rewards; reciting the
+    instructions is degeneracy. Comparing against both would punish the first.
+    """
     if not raw_output or not raw_output.strip():
         return CheckResult("not_degenerate", False, "output is empty or whitespace")
 
@@ -389,10 +414,11 @@ def check_not_degenerate(raw_output: str, prompt_text: str) -> CheckResult:
             f"line repeated {counts[worst]}x: {worst[:60]!r}",
         )
 
-    # Prompt echo: any long verbatim span of the prompt reappearing in the
+    # Prompt echo: any long verbatim span of the instructions reappearing in the
     # output. 40 chars is long enough that a shared phrase is not coincidence.
-    for start in range(0, max(0, len(raw_output) - _ECHO_WINDOW) + 1):
-        window = raw_output[start : start + _ECHO_WINDOW]
+    prose = _strip_sentinel_prefixes(raw_output)
+    for start in range(0, max(0, len(prose) - _ECHO_WINDOW) + 1):
+        window = prose[start : start + _ECHO_WINDOW]
         if len(window) == _ECHO_WINDOW and window in prompt_text:
             return CheckResult(
                 "not_degenerate", False, f"echoes the prompt verbatim: {window!r}"
@@ -557,7 +583,8 @@ def run_all_checks(inputs: CheckInputs) -> list[CheckResult]:
         check_forbidden_terms(inputs.free_text, inputs.forbidden_terms),
         check_fields_parsed(inputs.fallbacks),
         check_not_truncated(inputs.finish_reason),
-        check_not_degenerate(inputs.raw_output, inputs.prompt_text),
+        # Boilerplate, not the full prompt: quoting the news is grounding.
+        check_not_degenerate(inputs.raw_output, inputs.prompt_boilerplate),
         check_label_consistency(inputs.free_text, inputs.rsi_label, inputs.macd_label),
         check_numeric_fidelity(inputs.free_text, inputs.prompt_text),
         check_news_grounding(

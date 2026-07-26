@@ -265,6 +265,46 @@ def test_not_degenerate_ignores_short_shared_phrases():
     assert check_not_degenerate("RATIONALE: RSI is neutral.", _PROMPT).passed
 
 
+# The real system prompt contains both the required format and a worked example,
+# which is what makes the next two cases the difference between a useful check
+# and one that fires on every correct response.
+_REAL_BOILERPLATE = """You are a market sentiment analyst. Respond in EXACTLY \
+this format:
+
+LABEL: <bullish, bearish, or neutral>
+SCORE: <0-10>
+CONFIDENCE: <low, medium, or high>
+RATIONALE: <one sentence, must reference a specific fact from the input>
+
+Example:
+LABEL: bullish
+SCORE: 7
+CONFIDENCE: high
+RATIONALE: RSI crossed above 70 alongside a positive earnings headline."""
+
+
+def test_not_degenerate_does_not_flag_correct_format_compliance():
+    """`LABEL: bullish / SCORE: 7 / CONFIDENCE: high` is 40+ verbatim characters
+    of the prompt — and is exactly what a compliant model must emit."""
+    output = (
+        "LABEL: bullish\nSCORE: 7\nCONFIDENCE: high\n"
+        "RATIONALE: The new Ohio distribution centre expands capacity."
+    )
+    assert check_not_degenerate(output, _REAL_BOILERPLATE).passed
+
+
+def test_not_degenerate_still_catches_a_copied_worked_example():
+    """Reproducing the format is compliance; reproducing the example's rationale
+    is a model that read nothing."""
+    output = (
+        "LABEL: bullish\nSCORE: 7\nCONFIDENCE: high\n"
+        "RATIONALE: RSI crossed above 70 alongside a positive earnings headline."
+    )
+    result = check_not_degenerate(output, _REAL_BOILERPLATE)
+    assert not result.passed
+    assert "echoes" in result.detail
+
+
 # --- sentinel_not_hijacked ------------------------------------------------
 
 
