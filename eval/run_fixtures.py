@@ -32,6 +32,8 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import yaml
+
 from edge_analyst import store
 from edge_analyst.debate import (
     DebateState,
@@ -306,6 +308,46 @@ def score_sample(
     )
 
 
+def export_fixtures(
+    directory: str | Path, model_name: str, results: list[SampleResult]
+) -> Path:
+    """Write each raw response verbatim plus an expected.yaml sidecar, for replay
+    in CI by tests/test_recorded_responses.py.
+
+    The sidecar records what the *current* parsers and checks produce for each
+    captured response, which turns parser robustness into a regression gate
+    against real model output rather than against hand-written strings that
+    encode what we imagine a small model emits. Re-export after an intentional
+    parser change; a diff in the sidecar is then the change under review.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    sidecar_path = directory / "expected.yaml"
+
+    # Merge rather than overwrite: a directory accumulates captures from several
+    # models and several runs, and each is a distinct regression case.
+    existing = {}
+    if sidecar_path.exists():
+        with sidecar_path.open(encoding="utf-8") as handle:
+            existing = yaml.safe_load(handle) or {}
+
+    for result in results:
+        name = f"{_slug(model_name)}__{result.fixture_id}__{result.sample_idx}.txt"
+        (directory / name).write_text(result.raw_output, encoding="utf-8")
+        existing[name] = {
+            "model_name": model_name,
+            "fixture_id": result.fixture_id,
+            "stage": result.stage,
+            "finish_reason": result.completion.finish_reason,
+            "fallbacks": sorted(result.fallbacks),
+            "checks": {check.name: check.passed for check in result.checks},
+        }
+
+    with sidecar_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(existing, handle, sort_keys=True, allow_unicode=True)
+    return sidecar_path
+
+
 def sample_to_row(run_id: str, result: SampleResult) -> dict:
     return {
         "run_id": run_id,
@@ -339,6 +381,7 @@ def run(
     completion_fn=chat_completion_full,
     run_id: str | None = None,
     verbose: bool = True,
+    export_dir: str | Path | None = None,
 ) -> dict:
     """Runs the matrix and returns the run's JSON-shaped summary.
 
@@ -368,6 +411,7 @@ def run(
     store.save_eval_run(conn, run_row)
 
     rows = []
+    results: list[SampleResult] = []
     try:
         for fixture in fixtures:
             for fixture_stage in stages:
@@ -389,6 +433,7 @@ def run(
                     row = sample_to_row(run_id, result)
                     store.save_eval_sample(conn, row)
                     rows.append(row)
+                    results.append(result)
                     if verbose:
                         _print_sample(result)
     finally:
@@ -400,6 +445,11 @@ def run(
     out_path = Path(out_dir) / f"{run_id}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+
+    if export_dir is not None:
+        sidecar = export_fixtures(export_dir, model_name, results)
+        if verbose:
+            print(f"exported {len(results)} raw response(s) alongside {sidecar}")
 
     if verbose:
         _print_summary(rows, out_path)
@@ -451,6 +501,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--db", default="data/edge_analyst.db")
     parser.add_argument("--out", default="eval/results")
+    parser.add_argument(
+        "--export-fixtures",
+        default=None,
+        metavar="DIR",
+        help="also write each raw response + an expected.yaml sidecar here "
+        "(tests/fixtures/responses/) so CI can replay real model output",
+    )
     args = parser.parse_args(argv)
 
     print(
@@ -466,6 +523,7 @@ def main(argv: list[str] | None = None) -> None:
         max_tokens=args.max_tokens,
         db_path=args.db,
         out_dir=args.out,
+        export_dir=args.export_fixtures,
     )
 
 
