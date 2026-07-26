@@ -1,9 +1,5 @@
 # Edge Trading Analyst — project walkthrough
 
-Prepared as talking points for walking a senior dev through what this project is,
-why it's built the way it is, and where the open questions are. Organized so you can
-either read it top to bottom or jump to the section they push on.
-
 ---
 
 ## 1. The one-sentence pitch
