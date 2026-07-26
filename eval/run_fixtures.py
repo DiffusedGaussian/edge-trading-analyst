@@ -49,6 +49,24 @@ from eval.fixtures import Fixture, load_synthetic
 
 STAGES = ("sentiment", "debate_bull", "debate_bear", "trader")
 
+# The sentinel fields each stage is supposed to emit, and the parsed field that
+# carries its decision. Shared with eval/report.py so a fallback rate can be
+# reported per field including the fields that never fell back — a rate derived
+# only from observed failures silently omits the 0% rows.
+STAGE_SENTINELS: dict[str, tuple[str, ...]] = {
+    "sentiment": ("LABEL", "SCORE", "CONFIDENCE", "RATIONALE"),
+    "debate_bull": ("STANCE", "KEY_POINT", "CONFIDENCE"),
+    "debate_bear": ("STANCE", "KEY_POINT", "CONFIDENCE"),
+    "trader": ("ACTION", "REASONING", "ENTRY_PRICE", "STOP_LOSS", "POSITION_SIZING"),
+}
+
+STAGE_DECISION_FIELD: dict[str, str] = {
+    "sentiment": "label",
+    "debate_bull": "stance",
+    "debate_bear": "stance",
+    "trader": "action",
+}
+
 # The stage names --stage accepts, and which concrete stages each expands to.
 STAGE_GROUPS = {
     "sentiment": ("sentiment",),
@@ -183,12 +201,18 @@ def _parse_for_stage(
             signal.fallbacks,
             signal.rationale,
             signal.label,
-            {
-                "LABEL": signal.label,
-                "SCORE": _format_number(signal.score),
-                "CONFIDENCE": signal.confidence,
-                "RATIONALE": signal.rationale,
-            },
+            dict(
+                zip(
+                    STAGE_SENTINELS["sentiment"],
+                    (
+                        signal.label,
+                        _format_number(signal.score),
+                        signal.confidence,
+                        signal.rationale,
+                    ),
+                    strict=True,
+                )
+            ),
         )
     if stage in ("debate_bull", "debate_bear"):
         turn = parse_debate_response(text)
