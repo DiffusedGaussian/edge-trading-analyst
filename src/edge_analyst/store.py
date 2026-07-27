@@ -390,16 +390,29 @@ def fetch_decisions_for_judging(
 ) -> list[dict]:
     """One dict per (ticker, as_of) decision, most recent first, with its full
     debate history nested. `model` narrows to a single model's decisions — the
-    only way to judge one model's output without another's rows mixed in."""
+    only way to judge one model's output without another's rows mixed in.
+
+    Excludes rows with a NULL `close` — a decision saved before PR #3 added
+    close/rsi/macd_hist to the schema. `_migrate`'s ALTER TABLE backfills those
+    pre-existing rows with NULL rather than guessing a real value (see its own
+    docstring), which is correct for a migration but leaves them with no
+    ground truth to judge indicator_consistent/numeric_fidelity against —
+    format_market_context can't render "RSI: None (?)" meaningfully, so there
+    is nothing a judge could check here. `close` alone is sufficient: run_cycle
+    only ever calls save_decision with close/rsi/macd_hist set together, so a
+    NULL in one means NULL in all three.
+    """
     columns = ", ".join(_DECISION_COLUMNS)
     if model is None:
         rows = conn.execute(
-            f"SELECT {columns} FROM decisions ORDER BY as_of DESC LIMIT ?",
+            f"""SELECT {columns} FROM decisions WHERE close IS NOT NULL
+                ORDER BY as_of DESC LIMIT ?""",
             (limit,),
         ).fetchall()
     else:
         rows = conn.execute(
-            f"""SELECT {columns} FROM decisions WHERE model = ?
+            f"""SELECT {columns} FROM decisions
+                WHERE model = ? AND close IS NOT NULL
                 ORDER BY as_of DESC LIMIT ?""",
             (model, limit),
         ).fetchall()
@@ -417,11 +430,15 @@ def fetch_decisions_for_pairwise(
     them only makes sense on the same ticker and the same day's indicators.
     Where a model has several decisions for one ticker-day, the most recent is
     taken, so a re-run supersedes rather than multiplying the pairs.
+
+    Excludes rows with a NULL `close` — see fetch_decisions_for_judging's
+    docstring for why (a pre-PR#3 row migrated with no real indicator values
+    to compare).
     """
     columns = ", ".join(_DECISION_COLUMNS)
     rows = conn.execute(
         f"""SELECT {columns} FROM decisions
-            WHERE model IN (?, ?) ORDER BY as_of ASC""",
+            WHERE model IN (?, ?) AND close IS NOT NULL ORDER BY as_of ASC""",
         (model_a, model_b),
     ).fetchall()
     records = _nest_debate_turns(
