@@ -449,7 +449,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.8" },
 ]
-eval = [{ name = "modal", specifier = ">=0.63" }]
+eval = [{ name = "modal", specifier = ">=1.5" }]
 
 [[package]]
 name = "frozenlist"

@@ -62,7 +62,7 @@ eval/
   run_fixtures.py   Tier 0 runner: fixtures x k samples -> eval_runs/eval_samples
   report.py         scorecards, A-vs-B comparison, judge + pairwise summaries
   rubric.py         Tier 1: per-criterion and pairwise judge prompts/parsers
-  modal_app.py      Tier 1 on Modal: batched vLLM judging on an L40S
+  modal_app.py      Tier 1 on Modal: batched vLLM judging on one fp8 L40S
   calibrate.py      Tier 2: hand-labelling + Cohen's kappa against the judge
 tests/              unit + smoke tests (design-decision regressions)
 deploy/             pull-based Jetson deploy: systemd service + timer, deploy.sh
@@ -109,7 +109,7 @@ noise floor. Three tiers, cheapest first:
 | Tier | What | Where | Cost | Cadence |
 |---|---|---|---|---|
 | 0 | Deterministic checks, no judge | Jetson / CI | free | every run |
-| 1 | LLM-as-judge: per-criterion + pairwise | Modal L40S | GPU-minutes | per bake-off |
+| 1 | LLM-as-judge: per-criterion + pairwise | Modal L40S (fp8) | GPU-minutes | per bake-off |
 | 2 | Human calibration set + Cohen's kappa | local, manual | your time | on judge change |
 
 ```bash
@@ -117,6 +117,8 @@ make eval-fixtures MODEL=gemma-3-1b-it BASE_URL=http://localhost:8080   # Tier 0
 make eval-report RUN=latest
 make eval-compare A=baseline B=<run_id>
 
+modal secret create huggingface-secret HF_TOKEN=hf_...   # Tier 1, once
+make eval-prewarm                                  # Tier 1, cache weights (no GPU)
 make eval-judge                                    # Tier 1, per-criterion
 make eval-pairwise A=gemma-3-1b-it B=olmoe-1b-7b   # Tier 1, A-vs-B
 
@@ -127,6 +129,33 @@ make eval-calibrate CMD=score                      # Tier 2, kappa vs the judge
 The eval targets are not in CI: it has no GPU and no `llama-server`. Everything
 model-independent — the checks, the fixture loader, the aggregation, and the
 recorded-response replay — does run in `make check`.
+
+### What a Tier 1 run costs, and what keeps it cheap
+
+Judging 20 decisions is ~80 short prompts: tens of seconds of generation behind a
+multi-minute model load. The load *is* the bill, so `eval/modal_app.py` is built
+to pay it as rarely as possible.
+
+- **fp8 weights on one L40S.** Qwen2.5-32B in bf16 is ~65GB against ~44GB usable
+  and simply OOMs; fp8 halves it and Ada runs fp8 natively, so the cheaper card is
+  also the faster one. `--quantization ""` with `GPU = "A100-80GB"` goes back to
+  bf16. Quantization moves verdicts at the margin — re-run Tier 2 across a change.
+- **`make eval-prewarm`** downloads weights on a CPU-only container, so the first
+  run of a new judge never holds a GPU idle behind Hugging Face.
+- **One warm container per judge.** The model loads in `@modal.enter()`, not per
+  call, and lives for `scaledown_window` (5 min — long enough that back-to-back
+  runs are free, short enough that an abandoned session is not billed for an idle
+  GPU). `MODAL_JUDGE_GPU_SNAPSHOT=1` additionally restores a loaded engine
+  instead of rebuilding it, where the account has that beta enabled.
+- **Already-judged work is skipped.** Re-running `make eval-judge` sends nothing
+  and re-prints the same scorecard from SQLite; `FORCE=1` re-judges, which is only
+  worth it when the prompts or the judge changed.
+- **The record comes before the question** in every prompt, so the four criteria
+  for one decision share one cached prefix instead of prefilling that record four
+  times. `tests/test_rubric.py` pins that ordering.
+- **Prompts go in chunks**, so verdicts persist as they land and a retry re-runs
+  one chunk rather than the batch. `run_pairwise` takes `LIMIT=` / `SINCE=`,
+  because pairs × 4 criteria × 2 orders over a full shared history is unbounded.
 
 ### Two input sets, never averaged together
 

@@ -621,6 +621,25 @@ def fetch_criterion_verdicts(
     return [dict(zip(_CRITERION_COLUMNS, row, strict=True)) for row in rows]
 
 
+def fetch_judged_keys(
+    conn: sqlite3.Connection, judge_model: str
+) -> set[tuple[str, str, str, str]]:
+    """(ticker, as_of, model, criterion) already judged by `judge_model`.
+
+    Read before a judge run so already-judged decisions are never re-sent to the
+    GPU — see eval.rubric.pending_judge_jobs, which owns that decision and the
+    reason NULL verdicts count as judged. `model` is coalesced to "" to match
+    rubric.judge_key: a pre-`model`-column row stores NULL, and NULL is not equal
+    to itself in SQL, so it can never be matched by value.
+    """
+    rows = conn.execute(
+        """SELECT ticker, as_of, COALESCE(model, ''), criterion
+           FROM criterion_verdicts WHERE judge_model = ?""",
+        (judge_model,),
+    ).fetchall()
+    return {tuple(row) for row in rows}
+
+
 _PAIRWISE_COLUMNS = [
     "ticker",
     "as_of_a",
@@ -644,6 +663,22 @@ def save_pairwise_results(conn: sqlite3.Connection, rows: list[dict]) -> None:
         [tuple(row.get(column) for column in _PAIRWISE_COLUMNS) for row in rows],
     )
     conn.commit()
+
+
+def fetch_pairwise_keys(
+    conn: sqlite3.Connection, model_a: str, model_b: str, judge_model: str
+) -> set[tuple[str, str, str, str, str]]:
+    """(ticker, as_of_a, as_of_b, criterion, order_shown) already compared for
+    this model pair by this judge. The pairwise counterpart of
+    fetch_judged_keys; both orders are separate keys, deliberately, because a
+    comparison is only complete when both have been judged."""
+    rows = conn.execute(
+        """SELECT ticker, as_of_a, as_of_b, criterion, order_shown
+           FROM pairwise_results
+           WHERE model_a = ? AND model_b = ? AND judge_model = ?""",
+        (model_a, model_b, judge_model),
+    ).fetchall()
+    return {tuple(row) for row in rows}
 
 
 def fetch_pairwise_results(

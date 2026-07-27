@@ -6,7 +6,8 @@
 # the model-independent parts of the harness (checks, fixtures, aggregation, the
 # recorded-response replay) run in `make check`.
 .PHONY: install fmt lint test check run deploy \
-        eval-fixtures eval-report eval-compare eval-judge eval-pairwise eval-calibrate
+        eval-fixtures eval-report eval-compare eval-prewarm eval-judge eval-pairwise \
+        eval-calibrate
 
 install:            ## sync all deps incl. dev tools (ruff, pytest)
 	uv sync --frozen --dev
@@ -43,11 +44,24 @@ eval-report:        ## summarise one run: make eval-report RUN=<run_id> (or RUN=
 eval-compare:       ## side-by-side: make eval-compare A=<run_id> B=<run_id>
 	uv run python -m eval.report --compare $(A) $(B)
 
-eval-judge:         ## Tier 1 on Modal (needs `uv sync --group eval` + Modal auth)
-	uv run modal run eval/modal_app.py::run_judge
+# Tier 1 needs `uv sync --group eval`, Modal auth, and a Hugging Face token
+# (gated repos 401 without one, and anonymous 65GB pulls get rate-limited):
+#   modal secret create huggingface-secret HF_TOKEN=hf_...
+# Run eval-prewarm once per judge model: it downloads the weights to the Volume
+# on a CPU-only container instead of behind an idle GPU. JUDGE= overrides the
+# model, FORCE=1 re-judges what is already stored.
+eval-prewarm:       ## Tier 1: cache a judge's weights on the Volume, no GPU
+	uv run modal run eval/modal_app.py::prewarm $(if $(JUDGE),--judge-model $(JUDGE),)
 
-eval-pairwise:      ## Tier 1 bake-off: make eval-pairwise A=<model> B=<model>
-	uv run modal run eval/modal_app.py::run_pairwise --model-a $(A) --model-b $(B)
+eval-judge:         ## Tier 1 on Modal: make eval-judge [LIMIT=20] [FORCE=1]
+	uv run modal run eval/modal_app.py::run_judge \
+		$(if $(LIMIT),--limit $(LIMIT),) $(if $(JUDGE),--judge-model $(JUDGE),) \
+		$(if $(FORCE),--force,)
+
+eval-pairwise:      ## Tier 1 bake-off: make eval-pairwise A=<model> B=<model> [LIMIT=]
+	uv run modal run eval/modal_app.py::run_pairwise --model-a $(A) --model-b $(B) \
+		$(if $(LIMIT),--limit $(LIMIT),) $(if $(SINCE),--since $(SINCE),) \
+		$(if $(FORCE),--force,)
 
 eval-calibrate:     ## Tier 2: make eval-calibrate CMD="label --n 40" | CMD=score
 	uv run python -m eval.calibrate $(or $(CMD),score)

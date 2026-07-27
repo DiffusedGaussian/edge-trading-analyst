@@ -41,21 +41,27 @@ after it:
 VERDICT: <yes or no>
 REASON: <one sentence>"""
 
-_PREAMBLE = """You are auditing an automated trading analyst's reasoning, not \
+# The system message, byte-identical for every criterion. Together with the
+# record that follows it, this is the *shared prefix* the four criteria for one
+# record have in common — see build_judge_prompt for why that ordering matters.
+JUDGE_SYSTEM = """You are auditing an automated trading analyst's reasoning, not \
 its profitability. You are given the real technical indicators, the news, a \
 bull/bear debate, and the final trader decision for one cycle. Judge ONLY the \
-single question below — ignore every other aspect of the record, however \
-wrong it looks."""
+single question asked after the record — ignore every other aspect of the \
+record, however wrong it looks."""
 
-# One focused prompt per criterion, each with a worked yes and a worked no. The
+# One focused question per criterion, each with a worked yes and a worked no. The
 # examples are what stop a judge from answering the question it wishes it had
 # been asked; without them every criterion drifts toward "is this good analysis
 # overall", and four criteria collapse into one.
+#
+# These are the criterion-specific *tail* only. The shared preamble is
+# JUDGE_SYSTEM and the shared response format is appended after the tail, so a
+# criterion's text never appears before the record it asks about.
 CRITERIA: dict[str, str] = {
-    "bull_bear_distinct": f"""{_PREAMBLE}
-
-QUESTION: Did the bull and the bear argue genuinely different positions, or did \
-one simply restate the other's point in different words?
+    "bull_bear_distinct": """QUESTION: Did the bull and the bear argue genuinely \
+different positions, or did one simply restate the other's point in different \
+words?
 
 Answer "yes" if their key points rest on different evidence or reach different \
 conclusions. Answer "no" if one side's key point is a paraphrase of the other's, \
@@ -71,13 +77,9 @@ Example (no):
 Bull says "momentum is strong"; bear says "momentum looks strong but that is \
 risky". Same fact, same reading, one hedged.
 VERDICT: no
-REASON: The bear restates the bull's momentum claim rather than opposing it.
-
-{_RESPONSE_FORMAT}""",
-    "indicator_consistent": f"""{_PREAMBLE}
-
-QUESTION: Does the trader's reasoning agree with the RSI and MACD labels given \
-in the indicator block, with no contradiction?
+REASON: The bear restates the bull's momentum claim rather than opposing it.""",
+    "indicator_consistent": """QUESTION: Does the trader's reasoning agree with \
+the RSI and MACD labels given in the indicator block, with no contradiction?
 
 The labels in the indicator block are computed deterministically and are ground \
 truth. Answer "no" if the reasoning describes the indicators in a way that \
@@ -93,12 +95,9 @@ REASON: The reasoning describes RSI as mid-range, matching the neutral label.
 Example (no):
 RSI 61.7 (neutral). Reasoning: "The stock is overbought, so we should trim."
 VERDICT: no
-REASON: It calls a neutral RSI overbought, contradicting the given label.
-
-{_RESPONSE_FORMAT}""",
-    "news_fidelity": f"""{_PREAMBLE}
-
-QUESTION: Is the news represented accurately, with nothing invented?
+REASON: It calls a neutral RSI overbought, contradicting the given label.""",
+    "news_fidelity": """QUESTION: Is the news represented accurately, with \
+nothing invented?
 
 Answer "no" if any claim about the news is absent from the news text, if a \
 figure is altered, or if an event is asserted where the news text is empty or \
@@ -112,13 +111,9 @@ REASON: The only news claim matches the news text exactly.
 Example (no):
 News: "none". Rationale: "strong earnings this morning support the case."
 VERDICT: no
-REASON: It asserts an earnings event that does not appear in the input at all.
-
-{_RESPONSE_FORMAT}""",
-    "trader_consistent": f"""{_PREAMBLE}
-
-QUESTION: Does the final trader action follow logically from the bull and bear \
-positions as recorded?
+REASON: It asserts an earnings event that does not appear in the input at all.""",
+    "trader_consistent": """QUESTION: Does the final trader action follow \
+logically from the bull and bear positions as recorded?
 
 Answer "yes" if the action is a defensible resolution of the two positions, \
 including a Hold on a genuine standoff. Answer "no" if the action contradicts \
@@ -134,9 +129,7 @@ Example (no):
 Bull: buy (high confidence). Bear: hold (low). Action: Sell, reasoning endorses \
 the bull case.
 VERDICT: no
-REASON: It sells while its own reasoning endorses the bull's buy case.
-
-{_RESPONSE_FORMAT}""",
+REASON: It sells while its own reasoning endorses the bull's buy case.""",
 }
 
 CRITERION_NAMES: tuple[str, ...] = tuple(CRITERIA)
@@ -181,11 +174,29 @@ def format_record(record: dict) -> str:
 
 
 def build_judge_prompt(record: dict, criterion: str) -> list[dict]:
+    """Record first, criterion question last.
+
+    That order is load-bearing for cost, not style. vLLM's prefix cache can only
+    reuse a *prefix*: with the criterion in the system message and the record
+    after it, the four prompts for one record share only the short preamble and
+    the long part — full news text, every debate turn, the trader's reasoning —
+    gets prefilled four times. Putting the identical JUDGE_SYSTEM and then the
+    record first makes that expensive span one shared prefix, so criteria 2-4 for
+    a record hit the cache and only prefill their own question.
+
+    The response format still comes last, where recency keeps it obeyed.
+    """
     if criterion not in CRITERIA:
         raise KeyError(f"unknown criterion: {criterion}")
     return [
-        {"role": "system", "content": CRITERIA[criterion]},
-        {"role": "user", "content": format_record(record)},
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"{format_record(record)}\n\n"
+                f"{CRITERIA[criterion]}\n\n{_RESPONSE_FORMAT}"
+            ),
+        },
     ]
 
 
@@ -257,16 +268,16 @@ def build_pairwise_prompt(
     # "A" and "B" label *positions*, not records: in "ba" order record_b is shown
     # first and is therefore A. resolve_pairwise_winner maps back.
     first, second = (record_a, record_b) if order == "ab" else (record_b, record_a)
-    system = (
-        f"{_PAIRWISE_PREAMBLE}\n\nQUESTION: "
-        f"{_PAIRWISE_QUESTIONS[criterion]}\n\n{_PAIRWISE_FORMAT}"
-    )
+    # Both records before the question, for the same prefix-cache reason as
+    # build_judge_prompt — here the shared span is two full records, so the
+    # saving across the four criteria of one (pair, order) is larger still.
     user = (
         f"=== RECORD A ===\n{format_record(first)}\n\n"
-        f"=== RECORD B ===\n{format_record(second)}"
+        f"=== RECORD B ===\n{format_record(second)}\n\n"
+        f"QUESTION: {_PAIRWISE_QUESTIONS[criterion]}\n\n{_PAIRWISE_FORMAT}"
     )
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": _PAIRWISE_PREAMBLE},
         {"role": "user", "content": user},
     ]
 
@@ -339,3 +350,84 @@ def same_family(model_name: str, judge_model: str) -> bool:
     """Whether a judgment is at risk of same-family self-preference."""
     family = model_family(model_name)
     return family is not None and family == model_family(judge_model)
+
+
+# --- work planning -----------------------------------------------------------
+# Which prompts a run actually needs to send. Pure functions, here rather than in
+# modal_app.py, so the two rules that decide GPU spend — skip what is already
+# judged, and order what remains for the prefix cache — are testable with no
+# Modal SDK installed and no GPU.
+
+
+def judge_key(record: dict, criterion: str) -> tuple[str, str, str, str]:
+    """A criterion_verdicts row's identity, minus judge_model.
+
+    `model` is normalised to "" because a decision saved before the column
+    existed stores NULL there, and a NULL in a SQLite PRIMARY KEY compares
+    unequal to itself — so those rows would otherwise look permanently unjudged
+    and be re-judged on every run.
+    """
+    return (record["ticker"], record["as_of"], record.get("model") or "", criterion)
+
+
+def pending_judge_jobs(
+    records: list[dict],
+    criteria: tuple[str, ...],
+    judged_keys: set[tuple[str, str, str, str]],
+    force: bool = False,
+) -> list[tuple[dict, str]]:
+    """(record, criterion) pairs still needing a verdict, record-major.
+
+    Record-major ordering is what makes the prefix cache pay: the four criteria
+    for one record arrive consecutively, so criteria 2-4 reuse the KV cache that
+    criterion 1 left behind for that record's text.
+
+    Skipping keys already present is the largest cost lever in day-to-day use —
+    re-running one judge over the same decisions otherwise pays a full model load
+    plus a full batch to INSERT OR REPLACE byte-identical rows. Rows whose
+    verdict is NULL (unparseable) are skipped as well: sampling is temperature 0
+    with a fixed seed, so asking again reproduces the same unparseable answer.
+    Pass force=True when the prompts themselves changed, which is the one case
+    where the stored verdict is genuinely stale.
+    """
+    jobs = [(record, criterion) for record in records for criterion in criteria]
+    if force:
+        return jobs
+    return [job for job in jobs if judge_key(*job) not in judged_keys]
+
+
+def pairwise_key(
+    record_a: dict, record_b: dict, criterion: str, order: str
+) -> tuple[str, str, str, str, str]:
+    """A pairwise_results row's identity, minus judge_model and the models."""
+    return (
+        record_a["ticker"],
+        record_a["as_of"],
+        record_b["as_of"],
+        criterion,
+        order,
+    )
+
+
+def pending_pairwise_jobs(
+    pairs: list[tuple[dict, dict]],
+    criteria: tuple[str, ...],
+    orders: tuple[str, ...],
+    judged_keys: set[tuple[str, str, str, str, str]],
+    force: bool = False,
+) -> list[tuple[dict, dict, str, str]]:
+    """(record_a, record_b, criterion, order) jobs still needing a comparison.
+
+    Grouped pair-major then *order*-major, with criteria innermost: the cacheable
+    prefix here is the two records as displayed, which is identical across the
+    four criteria of one display order and different between the two orders.
+    """
+    jobs = [
+        (record_a, record_b, criterion, order)
+        for record_a, record_b in pairs
+        for order in orders
+        for criterion in criteria
+    ]
+    if force:
+        return jobs
+    return [job for job in jobs if pairwise_key(*job) not in judged_keys]

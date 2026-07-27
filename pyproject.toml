@@ -28,7 +28,11 @@ dev = [
 # deploy/invoke — vllm + torch are pip_install'd inside the Modal image only,
 # never a local dependency (same convention as the gaussian_splatting app).
 eval = [
-    "modal>=0.63",
+    # >=1.5, not the old >=0.63: modal_app.py's cost work needs APIs that only
+    # exist in 1.x -- modal.parameter (per-model warm containers), the
+    # scaledown_window/min_containers names, Image.uv_pip_install,
+    # Secret.from_name(required_keys=...) and experimental_options.
+    "modal>=1.5",
 ]
 
 [tool.ruff]
