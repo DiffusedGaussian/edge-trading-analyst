@@ -42,9 +42,24 @@ model_cache = modal.Volume.from_name(
 # vLLM resolves its own compatible torch version — pinning torch separately here
 # (unlike gaussian_splatting's CUDA-kernel-specific pin) risks a mismatch for no
 # benefit, since nothing else in this image needs a specific torch build.
+#
+# transformers IS pinned, unlike torch, because vllm==0.8.5 only declares
+# "transformers >= 4.51.1" with no upper bound (see its requirements/common.txt
+# for that version) -- so an unpinned build reproducibly resolves whatever is
+# newest on PyPI at build time. Reproduced live: that resolved transformers
+# 5.14.1, whose PreTrainedTokenizerBase no longer has `all_special_tokens_extended`
+# (confirmed present in transformers v4.57.0's tokenization_utils_base.py, absent
+# in v5.0.0's) -- a property vllm==0.8.5's own get_cached_tokenizer() still calls
+# unconditionally, crashing every judge run with
+# "AttributeError: Qwen2Tokenizer has no attribute all_special_tokens_extended"
+# before a single prompt is judged. <5 stays within the major version this
+# vLLM release was built against; it is not an exact pin, so routine 4.x
+# bugfix releases keep resolving without a manual bump.
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("vllm==0.8.5", "huggingface_hub[hf_transfer]")
+    .pip_install(
+        "vllm==0.8.5", "transformers>=4.51.1,<5", "huggingface_hub[hf_transfer]"
+    )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
     # Local code ships with every run, so edits to eval/ or src/edge_analyst
     # never trigger an image rebuild.
