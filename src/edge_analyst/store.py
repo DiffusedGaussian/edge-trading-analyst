@@ -131,7 +131,19 @@ CREATE TABLE IF NOT EXISTS pairwise_results (
 # wild. `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so it can
 # never add these — _migrate does.
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
-    "decisions": [("model", "TEXT")],
+    # close/rsi/macd_hist predate this migration mechanism: they were added to
+    # the schema in PR #3 with no migration shipped for existing DBs, so a
+    # decisions table created before that PR is still missing them today (found
+    # live on the Jetson: `save_decision` failing with "no column named close").
+    # Listed here alongside `model` so both generations of pre-existing DBs
+    # — pre-PR#3 (missing all four) and pre-this-session (missing only model)
+    # — converge to the current schema from a single connection.
+    "decisions": [
+        ("close", "REAL"),
+        ("rsi", "REAL"),
+        ("macd_hist", "REAL"),
+        ("model", "TEXT"),
+    ],
     "debate_turns": [("model", "TEXT")],
 }
 

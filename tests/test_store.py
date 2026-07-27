@@ -295,6 +295,74 @@ def test_migrate_is_idempotent_across_connections(tmp_path):
     assert _columns(conn, "decisions").count("model") == 1
 
 
+# The decisions/debate_turns DDL as it stood *before* PR #3 added
+# close/rsi/macd_hist to decisions — a generation older than _PRE_MODEL_SCHEMA
+# above. That PR shipped no migration for existing DBs, so a decisions table
+# created before it merged is still missing all three today. Found live: a
+# Jetson DB predating PR #3 hit `save_decision failing with "no column named
+# close"`, because CREATE TABLE IF NOT EXISTS never reaches an existing table.
+_PRE_INDICATOR_SCHEMA = """
+CREATE TABLE decisions (
+    ticker TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    gate_reasons TEXT,
+    news_text TEXT,
+    sentiment_label TEXT, sentiment_score REAL,
+    sentiment_confidence TEXT, sentiment_rationale TEXT,
+    trader_action TEXT, trader_reasoning TEXT,
+    trader_entry_price REAL, trader_stop_loss REAL, trader_position_sizing REAL,
+    PRIMARY KEY (ticker, as_of)
+);
+CREATE TABLE debate_turns (
+    ticker TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    stance TEXT, key_point TEXT, confidence TEXT,
+    PRIMARY KEY (ticker, as_of, round, side)
+);
+"""
+
+
+def test_migrate_reaches_a_pre_indicator_column_db(tmp_path):
+    db_path = tmp_path / "ancient.db"
+    old = sqlite3.connect(db_path)
+    old.executescript(_PRE_INDICATOR_SCHEMA)
+    old.execute(
+        "INSERT INTO decisions (ticker, as_of, trader_action) "
+        "VALUES ('AAPL', 'then', 'hold')"
+    )
+    old.commit()
+    old.close()
+
+    conn = store.get_connection(db_path)
+
+    for column in ("close", "rsi", "macd_hist", "model"):
+        assert _columns(conn, "decisions").count(column) == 1, column
+    # Additive only: the pre-existing row survives, with NULLs for the new columns.
+    assert conn.execute(
+        "SELECT trader_action, close, model FROM decisions"
+    ).fetchone() == ("hold", None, None)
+
+
+def test_save_decision_works_on_a_migrated_pre_indicator_db(tmp_path):
+    """The actual reproduction of the live Jetson failure: `save_decision`
+    (the real codepath run_cycle calls) must succeed against a DB that
+    predates PR #3, not just PRAGMA-report the right columns."""
+    db_path = tmp_path / "ancient.db"
+    old = sqlite3.connect(db_path)
+    old.executescript(_PRE_INDICATOR_SCHEMA)
+    old.close()
+
+    conn = store.get_connection(db_path)
+    as_of = _save(conn, "AAPL", "2026-07-27T10:00:00", "gemma-3-1b-it")
+
+    row = conn.execute(
+        "SELECT close, rsi, macd_hist, model FROM decisions WHERE as_of = ?", (as_of,)
+    ).fetchone()
+    assert row == (150.0, 55.0, 0.5, "gemma-3-1b-it")
+
+
 def _save(conn, ticker, as_of, model, action="buy"):
     return store.save_decision(
         conn,
