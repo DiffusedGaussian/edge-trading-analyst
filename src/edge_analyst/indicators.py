@@ -48,6 +48,19 @@ def macd(
     )
 
 
+def wilder_smoothing(series: pd.Series, period: int) -> pd.Series:
+    """Wilder's smoothing (aka RMA) — alpha = 1/period, not a standard EMA's
+    2/(period+1). This is a distinct convention from `ema()` above, not a
+    special case of it: Welles Wilder defined RSI with this specific alpha,
+    and it's what every charting package/broker means by "a 14-period RSI".
+    Using ema()'s alpha here would silently compute a ~2x-more-sensitive
+    variant that no other RSI reader agrees with. `adjust=False` for the
+    same reason as ema() — the exact recursive definition, not pandas'
+    bias-corrected default.
+    """
+    return series.ewm(alpha=1 / period, adjust=False).mean()
+
+
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Ratio of up-move strength to down-move strength, scaled to 0-100.
 
@@ -62,8 +75,8 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     gains = delta.clip(lower=0)
     losses = -delta.clip(upper=0)
 
-    avg_gain = ema(gains, period)
-    avg_loss = ema(losses, period)
+    avg_gain = wilder_smoothing(gains, period)
+    avg_loss = wilder_smoothing(losses, period)
 
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
