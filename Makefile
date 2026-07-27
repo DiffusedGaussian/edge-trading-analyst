@@ -43,8 +43,8 @@ eval-report:        ## summarise one run: make eval-report RUN=<run_id> (or RUN=
 eval-compare:       ## side-by-side: make eval-compare A=<run_id> B=<run_id>
 	uv run python -m eval.report --compare $(A) $(B)
 
-eval-judge:         ## Tier 1 on Modal (needs the eval extra + Modal auth)
-	uv run modal run eval/modal_app.py
+eval-judge:         ## Tier 1 on Modal (needs `uv sync --group eval` + Modal auth)
+	uv run modal run eval/modal_app.py::run_judge
 
 eval-pairwise:      ## Tier 1 bake-off: make eval-pairwise A=<model> B=<model>
 	uv run modal run eval/modal_app.py::run_pairwise --model-a $(A) --model-b $(B)
