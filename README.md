@@ -62,7 +62,7 @@ eval/
   run_fixtures.py   Tier 0 runner: fixtures x k samples -> eval_runs/eval_samples
   report.py         scorecards, A-vs-B comparison, judge + pairwise summaries
   rubric.py         Tier 1: per-criterion and pairwise judge prompts/parsers
-  modal_app.py      Tier 1 on Modal: batched vLLM judging on one fp8 L40S
+  modal_app.py      Tier 1 on Modal: batched vLLM judging on one int8 L40S
   calibrate.py      Tier 2: hand-labelling + Cohen's kappa against the judge
 tests/              unit + smoke tests (design-decision regressions)
 deploy/             pull-based Jetson deploy: systemd service + timer, deploy.sh
@@ -109,7 +109,7 @@ noise floor. Three tiers, cheapest first:
 | Tier | What | Where | Cost | Cadence |
 |---|---|---|---|---|
 | 0 | Deterministic checks, no judge | Jetson / CI | free | every run |
-| 1 | LLM-as-judge: per-criterion + pairwise | Modal L40S (fp8) | GPU-minutes | per bake-off |
+| 1 | LLM-as-judge: per-criterion + pairwise | Modal L40S (int8) | GPU-minutes | per bake-off |
 | 2 | Human calibration set + Cohen's kappa | local, manual | your time | on judge change |
 
 ```bash
@@ -136,10 +136,17 @@ Judging 20 decisions is ~80 short prompts: tens of seconds of generation behind 
 multi-minute model load. The load *is* the bill, so `eval/modal_app.py` is built
 to pay it as rarely as possible.
 
-- **fp8 weights on one L40S.** Qwen2.5-32B in bf16 is ~65GB against ~44GB usable
-  and simply OOMs; fp8 halves it and Ada runs fp8 natively, so the cheaper card is
-  also the faster one. `--quantization ""` with `GPU = "A100-80GB"` goes back to
-  bf16. Quantization moves verdicts at the margin — re-run Tier 2 across a change.
+- **A pre-quantized int8 checkpoint on one L40S.** The default judge's bf16
+  release is ~65GB against ~44GB usable and OOMs outright. Asking vLLM to
+  quantize a bf16 checkpoint to fp8 during load does **not** avoid this on the
+  pinned vLLM version — the process still held ~44GB in use at the same point
+  in loading, no smaller than the bf16 failure. What actually works is a
+  checkpoint already stored in low precision on disk (`DEFAULT_JUDGE`, ~33-35GB
+  in int8). This one is a third-party community quantization, not an official
+  Qwen/RedHatAI release — run `make eval-calibrate` against it before trusting
+  its verdicts, and treat re-quantizing or swapping the source as a live option
+  if it scores badly. Quantization moves verdicts at the margin generally —
+  re-run Tier 2 across any change here.
 - **`make eval-prewarm`** downloads weights on a CPU-only container, so the first
   run of a new judge never holds a GPU idle behind Hugging Face.
 - **One warm container per judge.** The model loads in `@modal.enter()`, not per
@@ -188,9 +195,11 @@ Three numbers decide whether a result is a result at all:
   name a winner inside it.
 
 Tier 1 also warns when the judge and the model under test share a family
-(`rubric.same_family`) — Qwen2.5-32B scoring Qwen3-30B-A3B output is
-self-preference risk. `--second-judge` runs a different family and reports
-inter-judge agreement.
+(`rubric.same_family`) — the default Qwen3-32B judge scoring Qwen3-30B-A3B
+output is self-preference risk. `--second-judge` runs a different family and
+reports inter-judge agreement (note: `DEFAULT_SECOND_JUDGE`'s bf16 24B does not
+currently fit an L40S either — it needs its own quantized repo before it can
+run here).
 
 Tier 2 is what makes Tiers 0–1 falsifiable: without it, a judge that answers
 "yes" to everything and a genuinely good cascade produce the same scorecard.

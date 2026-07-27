@@ -23,7 +23,7 @@ Target architecture, three tiers:
 | Tier | What | Where it runs | Cost | Cadence |
 |---|---|---|---|---|
 | 0 | Deterministic checks (no judge) | Jetson / CI | free | every run |
-| 1 | LLM-as-judge, per-criterion + pairwise | Modal L40S (fp8) | GPU-minutes | per bake-off |
+| 1 | LLM-as-judge, per-criterion + pairwise | Modal L40S (int8) | GPU-minutes | per bake-off |
 | 2 | Human calibration set + Cohen's kappa | local, manual | your time | on judge change |
 
 Two input sets, **kept separate and never averaged together**:
@@ -525,13 +525,23 @@ the bill, and the first version of `modal_app.py` paid it once per `.remote()` c
 in a two-judge run, again for every re-run, and again for every rubric edit. What the
 current file does about that, in rough order of what it saves:
 
-- **fp8 weights on one L40S.** bf16 Qwen2.5-32B is ~65GB against ~44GB usable and OOMs
-  outright (`torch.OutOfMemoryError: ... total capacity of 44.39 GiB`). fp8 halves it and
-  Ada runs fp8 natively, so the cheaper card is also the faster one. `MAX_MODEL_LEN = 8192`
-  matches the real prompt sizes instead of Qwen's 32k, which is what leaves room for KV
-  cache to hold more than a couple of concurrent sequences; an fp8 KV cache doubles that
-  again. Quantization moves verdicts at the margin — treat a change of it as a change of
-  judge and re-run Tier 2 across it.
+- **A pre-quantized int8 checkpoint on one L40S.** bf16 Qwen2.5-32B-Instruct is ~65GB
+  against ~44GB usable and OOMs outright
+  (`torch.OutOfMemoryError: ... total capacity of 44.39 GiB`). The next attempt asked
+  vLLM to quantize that same bf16 checkpoint to fp8 during load — this does **not**
+  shrink the load-time footprint on the pinned vLLM version; the process still held
+  ~44.38GB in use at the identical point in loading, no different from the bf16
+  failure. Dynamic (on-the-fly) quantization of an unquantized checkpoint is not a
+  reliable memory fix here. What works is a checkpoint already stored in low precision
+  on disk: `DEFAULT_JUDGE` is now a community int8 GPTQ quantization of Qwen3-32B
+  (~33-35GB), with `DEFAULT_QUANTIZATION` left empty so vLLM reads the quantization
+  method from the checkpoint's own config rather than being told one. Its provenance
+  is unverified (not an official Qwen/RedHatAI release) — run `eval-calibrate` against
+  it before trusting scores. `MAX_MODEL_LEN = 8192` matches the real prompt sizes
+  instead of the full context window, which is what leaves room for KV cache to hold
+  more than a couple of concurrent sequences. Quantization moves verdicts at the
+  margin generally — treat any change here like a change of judge and re-run Tier 2
+  across it.
 - **`Judge` is a `@app.cls`**, loading in `@modal.enter()` once per container rather than
   once per call, with a deliberately short `scaledown_window` (a warm GPU only beats a
   reload while the reload it saves costs more than the idle time it burns).
@@ -546,6 +556,11 @@ current file does about that, in rough order of what it saves:
   unbounded in the shared history of the two models.
 - **`cpu=8`/`memory` requested explicitly**, since the default floor throttles both the
   download and tokenizing a few thousand prompts before the GPU sees any of them.
+- **No retries on `Judge`.** A first live run with `retries=modal.Retries(max_retries=2)`
+  set retried an OOM in `@modal.enter()` twice — a wasted ~2x, since a fixed model against
+  a fixed GPU fails identically every time. Retries only make sense for genuinely transient
+  failures (a network blip mid-download); a sizing failure is not one, so this class now
+  runs with `retries=0`.
 
 **Acceptance:** existing `test_rubric.py` tests are rewritten (not deleted) against the new
 per-criterion API; add tests that an unparseable judge response yields

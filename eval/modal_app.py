@@ -45,32 +45,48 @@ import modal
 
 app = modal.App("edge-analyst-judge")
 
-DEFAULT_JUDGE = "Qwen/Qwen2.5-32B-Instruct"
+# DEFAULT_JUDGE's model has been through two failed attempts already, both
+# worth keeping as a record of what does not work here:
+#
+#   Qwen2.5-32B-Instruct in bf16 is ~65GB against an L40S's ~44GB usable, and
+#   vLLM died on exactly that: "torch.OutOfMemoryError: ... total capacity of
+#   44.39 GiB". Passing quantization="fp8" against that same bf16 checkpoint was
+#   tried next, on the assumption that it would quantize during load -- it does
+#   not, in this vLLM version: the process still held ~44.38GB in use at the
+#   same point in loading, indistinguishable from the plain bf16 failure. Dynamic
+#   (on-the-fly) quantization of an unquantized checkpoint is not a reliable way
+#   to shrink load-time memory here -- what actually works is a checkpoint that
+#   is already stored in low precision on disk, which is why DEFAULT_JUDGE below
+#   is a pre-quantized repo rather than Qwen's bf16 release plus a quantization
+#   flag.
+#
+# Qwen3-32B has no official Qwen- or RedHatAI-published int8 checkpoint --
+# RedHatAI/Qwen3-32B-quantized.w4a16 exists (int4, trusted quantization tooling)
+# but int4 moves the judge's numerics further from its bf16 baseline than int8
+# does, which matters more for a judge than for a serving deployment. This repo
+# is a third-party (community) GPTQ-Int8 quantization, not from Qwen or a vetted
+# quantization org -- its calibration and license are UNVERIFIED. Run
+# `make eval-calibrate` against it before trusting its verdicts, same as any
+# judge change, and treat switching to a different int8 source as a live option
+# if it turns out to score badly.
+DEFAULT_JUDGE = "JunHowie/Qwen3-32B-GPTQ-Int8"
 # A second judge from a different family, for measuring inter-judge agreement.
 # The default judge is Qwen; scoring Qwen3-30B-A3B output with it risks
 # same-family self-preference, which stays invisible unless another family checks.
+# Unresolved: this bf16 24B (~47GB) does not fit an L40S either, for the same
+# reason the default judge didn't -- --second-judge will need its own quantized
+# repo (or GPU="A100-80GB" for that call specifically) before it can run here.
 DEFAULT_SECOND_JUDGE = "mistralai/Mistral-Small-24B-Instruct-2501"
 
-# Weight quantization, applied by vLLM at load time to the bf16 checkpoints named
-# above -- the reason a 32B judge runs on one 48GB card at all.
-#
-# bf16 was never going to fit: Qwen2.5-32B is ~65GB of weights against an L40S's
-# ~44GB usable, and vLLM died on exactly that --
-# "torch.OutOfMemoryError: CUDA out of memory... total capacity of 44.39 GiB".
-# FP8 halves the weights to ~33GB, leaving ~11GB for KV cache, and Ada (sm89)
-# runs FP8 natively, so it is faster than bf16 rather than a compromise for
-# space. Chosen over an A100-80GB, which also fits bf16, because an L40S is both
-# cheaper per hour and quicker through the batch; and over int4 AWQ, cheaper
-# still, because W8A8 stays far closer to the bf16 verdicts already recorded.
-#
-# It is not free of consequence: quantization changes the judge's numerics, so
-# verdicts shift at the margin. Treat a change here like a change of judge --
-# re-run eval-calibrate and check Cohen's kappa before comparing scores across
-# it. To go back to bf16: --quantization "" with GPU = "A100-80GB". Pass
-# --quantization "" for an already-quantized repo too (e.g. ...-Instruct-AWQ):
-# vLLM reads the method from the checkpoint's own config, and naming a conflicting
-# one here is an error rather than an override.
-DEFAULT_QUANTIZATION = "fp8"
+# Left empty: DEFAULT_JUDGE is already quantized on disk, so vLLM should read the
+# method from the checkpoint's own config rather than being told one -- naming a
+# conflicting method here is an error, not an override, and the checkpoint's
+# packaging format (classic GPTQ vs. compressed-tensors) is not independently
+# confirmed. Set this only to force *dynamic* quantization of an unquantized
+# checkpoint (e.g. "fp8" against a bf16 repo) -- which the paragraph above found
+# does not shrink load-time memory in this vLLM version, so treat that path as
+# unproven rather than a routine option.
+DEFAULT_QUANTIZATION = ""
 
 GPU = "L40S"
 
@@ -198,7 +214,13 @@ def prewarm(judge_model: str = DEFAULT_JUDGE) -> None:
     # and an abandoned session cheap. A long window — or min_containers — would
     # quietly bill for an idle GPU instead.
     scaledown_window=300,
-    retries=modal.Retries(max_retries=2, initial_delay=5.0),
+    # No retries. A failure in @modal.enter() here is a model-vs-GPU sizing
+    # problem (an OOM at a fixed weight size against a fixed card), which is
+    # deterministic -- retrying reproduces the identical failure and just
+    # multiplies the wasted boot time. Retries exist for transient infra
+    # flakiness (preemption, a network blip mid-download); this class has none
+    # of that risk once `prewarm` has already cached the weights.
+    retries=0,
     enable_memory_snapshot=GPU_SNAPSHOT,
     experimental_options={"enable_gpu_snapshot": "true"} if GPU_SNAPSHOT else {},
 )
@@ -228,11 +250,13 @@ class Judge:
             # engine, set explicitly so a version flip cannot silently drop the
             # saving the prompt layout was designed around.
             enable_prefix_caching=True,
-            # An fp8 KV cache doubles how many prompts fit in the ~11GB left
-            # after fp8 weights, and concurrency is what sets wall-clock here.
-            # Tied to the weight setting: with bf16 weights there is no reason to
-            # accept the extra approximation.
-            kv_cache_dtype="fp8" if self.quantization == "fp8" else "auto",
+            # Left at vLLM's default. An int8 KV cache would buy back some of
+            # the headroom int8 weights leave tight (~5-8GB free on an L40S at
+            # 0.92 utilization), but it also forces vLLM's V1 engine to fall
+            # back to V0 and stacks a second lossy approximation on top of an
+            # already-quantized judge. Worth revisiting only if concurrency
+            # against real batches turns out to need it.
+            kv_cache_dtype="auto",
         )
         # Once per cold start, not once per call. Weights arrive via `prewarm`,
         # but vLLM's torch.compile artifacts are written during this load and are
