@@ -455,6 +455,44 @@ def test_fetch_decisions_for_judging_filters_on_model():
     assert len(store.fetch_decisions_for_judging(conn, limit=10)) == 2
 
 
+def test_fetch_decisions_for_judging_excludes_rows_with_null_close():
+    """Reproduces the live failure: a decision saved before PR #3 added
+    close/rsi/macd_hist survives _migrate's ALTER TABLE with those columns
+    NULL (a migration backfills NULL, never a guessed value). Judging such a
+    row crashes format_market_context on f"${None:.2f}" -- there is no ground
+    truth to check the model against, so it must never reach the judge."""
+    conn = store.get_connection(":memory:")
+    _save(conn, "AAPL", "2026-07-24T10:00:00", "model-a")
+    # Simulates a pre-PR#3 row post-migration: real trader_action, but the
+    # indicator columns ALTER TABLE could only fill with NULL.
+    conn.execute(
+        "INSERT INTO decisions (ticker, as_of, model, trader_action) "
+        "VALUES ('MSFT', '2026-07-25T10:00:00', 'model-a', 'hold')"
+    )
+    conn.commit()
+
+    records = store.fetch_decisions_for_judging(conn, limit=10)
+
+    assert [r["ticker"] for r in records] == ["AAPL"]
+    assert all(r["close"] is not None for r in records)
+
+
+def test_fetch_decisions_for_pairwise_excludes_rows_with_null_close():
+    conn = store.get_connection(":memory:")
+    _save(conn, "AAPL", "2026-07-24T10:00:00", "model-a")
+    conn.execute(
+        "INSERT INTO decisions (ticker, as_of, model) "
+        "VALUES ('AAPL', '2026-07-25T10:00:00', 'model-b')"
+    )
+    conn.commit()
+
+    pairs = store.fetch_decisions_for_pairwise(conn, "model-a", "model-b")
+
+    # model-b's only row has a NULL close (unmigrated legacy data) -> no pair,
+    # rather than crashing the prompt builder on a None indicator value.
+    assert pairs == []
+
+
 def test_fetch_decisions_for_pairwise_matches_on_ticker_and_day():
     conn = store.get_connection(":memory:")
     # Same ticker, same day, different seconds -> a pair.
