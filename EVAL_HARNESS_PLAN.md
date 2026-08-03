@@ -23,7 +23,7 @@ Target architecture, three tiers:
 | Tier | What | Where it runs | Cost | Cadence |
 |---|---|---|---|---|
 | 0 | Deterministic checks (no judge) | Jetson / CI | free | every run |
-| 1 | LLM-as-judge, per-criterion + pairwise | Modal L40S | GPU-minutes | per bake-off |
+| 1 | LLM-as-judge, per-criterion + pairwise | Modal L40S (int8) | GPU-minutes | per bake-off |
 | 2 | Human calibration set + Cohen's kappa | local, manual | your time | on judge change |
 
 Two input sets, **kept separate and never averaged together**:
@@ -442,8 +442,8 @@ report `n/a`, not `0.0`).
 `tests/test_rubric.py`
 
 **8a. One criterion per call.** Replace the single four-question `_SYSTEM_PROMPT` with a
-`CRITERIA: dict[str, str]` mapping criterion name -> its own focused system prompt, each
-ending in a two-line response format:
+`CRITERIA: dict[str, str]` mapping criterion name -> its own focused question, assembled
+against a shared `JUDGE_SYSTEM` preamble and ending in a two-line response format:
 
 ```
 VERDICT: <yes or no>
@@ -453,6 +453,14 @@ REASON: <one sentence>
 `build_judge_prompt(record: dict, criterion: str) -> list[dict]`. Four calls per record
 instead of one; on Modal these go into the same batched `llm.chat()`, so wall-clock barely
 moves. Give each criterion prompt one worked yes example and one no example.
+
+The message layout is **record first, criterion question last** — a cost decision, not a
+style one. vLLM's prefix cache can only reuse a shared *prefix*, so with the criterion in
+front the long span (full news text, every debate turn, the trader's reasoning) is
+prefilled once per criterion; behind it, the four criteria for one record share a single
+cached prefix. `pending_judge_jobs` keeps the batch record-major so those four arrive
+consecutively, and `tests/test_rubric.py` pins both the ordering and the shared-prefix
+property. The response format still comes last, where recency keeps it obeyed.
 
 **8b. Stop imputing.** Replace `parse_judgment` with:
 
@@ -511,10 +519,55 @@ default unchanged, and add a `--second-judge` option that runs a different famil
 (e.g. `mistralai/Mistral-Small-24B-Instruct-2501`) and reports inter-judge agreement. When
 the model under test shares a family with the judge, `report.py` must print a warning line.
 
+**8f. The deployment's cost structure.** A judge run at `limit=20` is ~80 short prompts:
+tens of seconds of generation behind a multi-minute model load. Loading, not judging, is
+the bill, and the first version of `modal_app.py` paid it once per `.remote()` call — twice
+in a two-judge run, again for every re-run, and again for every rubric edit. What the
+current file does about that, in rough order of what it saves:
+
+- **A pre-quantized int8 checkpoint on one L40S.** bf16 Qwen2.5-32B-Instruct is ~65GB
+  against ~44GB usable and OOMs outright
+  (`torch.OutOfMemoryError: ... total capacity of 44.39 GiB`). The next attempt asked
+  vLLM to quantize that same bf16 checkpoint to fp8 during load — this does **not**
+  shrink the load-time footprint on the pinned vLLM version; the process still held
+  ~44.38GB in use at the identical point in loading, no different from the bf16
+  failure. Dynamic (on-the-fly) quantization of an unquantized checkpoint is not a
+  reliable memory fix here. What works is a checkpoint already stored in low precision
+  on disk: `DEFAULT_JUDGE` is now a community int8 GPTQ quantization of Qwen3-32B
+  (~33-35GB), with `DEFAULT_QUANTIZATION` left empty so vLLM reads the quantization
+  method from the checkpoint's own config rather than being told one. Its provenance
+  is unverified (not an official Qwen/RedHatAI release) — run `eval-calibrate` against
+  it before trusting scores. `MAX_MODEL_LEN = 8192` matches the real prompt sizes
+  instead of the full context window, which is what leaves room for KV cache to hold
+  more than a couple of concurrent sequences. Quantization moves verdicts at the
+  margin generally — treat any change here like a change of judge and re-run Tier 2
+  across it.
+- **`Judge` is a `@app.cls`**, loading in `@modal.enter()` once per container rather than
+  once per call, with a deliberately short `scaledown_window` (a warm GPU only beats a
+  reload while the reload it saves costs more than the idle time it burns).
+- **`prewarm`** pulls weights on a CPU-only container with its own timeout and retries, so a
+  download never runs down a judge run's clock behind an idle GPU.
+- **Skip what is already judged.** `store.fetch_judged_keys` /
+  `rubric.pending_judge_jobs` mean a re-run sends nothing and re-prints the same scorecard
+  from SQLite. NULL verdicts count as judged: decoding is greedy with a fixed seed, so
+  re-asking buys the identical unparseable answer at full price. `--force` overrides.
+- **Chunked calls** (`CHUNK_SIZE`) so verdicts persist as they land and a retry re-runs one
+  chunk, not the batch; **`--limit`/`--since` on pairwise**, whose job count is otherwise
+  unbounded in the shared history of the two models.
+- **`cpu=8`/`memory` requested explicitly**, since the default floor throttles both the
+  download and tokenizing a few thousand prompts before the GPU sees any of them.
+- **No retries on `Judge`.** A first live run with `retries=modal.Retries(max_retries=2)`
+  set retried an OOM in `@modal.enter()` twice — a wasted ~2x, since a fixed model against
+  a fixed GPU fails identically every time. Retries only make sense for genuinely transient
+  failures (a network blip mid-download); a sizing failure is not one, so this class now
+  runs with `retries=0`.
+
 **Acceptance:** existing `test_rubric.py` tests are rewritten (not deleted) against the new
 per-criterion API; add tests that an unparseable judge response yields
 `verdict=None` and never a default, and that `build_pairwise_prompt` with
-`order="ba"` genuinely swaps the two records in the rendered text.
+`order="ba"` genuinely swaps the two records in the rendered text. The prompt ordering and
+the skip rules are pinned by tests too — both are pure functions in `rubric.py` precisely
+so they are testable with no Modal SDK and no GPU.
 
 ---
 
@@ -557,8 +610,11 @@ eval-report:        ## summarise one run: make eval-report RUN=<run_id>
 eval-compare:       ## side-by-side: make eval-compare A=<run_id> B=<run_id>
 	uv run python -m eval.report --compare $(A) $(B)
 
-eval-judge:         ## Tier 1 on Modal (needs the eval extra + Modal auth)
-	uv run modal run eval/modal_app.py
+eval-prewarm:       ## Tier 1: cache a judge's weights on the Volume, no GPU
+	uv run modal run eval/modal_app.py::prewarm
+
+eval-judge:         ## Tier 1 on Modal (needs the eval extra, Modal auth, HF token)
+	uv run modal run eval/modal_app.py::run_judge
 ```
 
 Commit `eval/results/baseline.json` from the gemma-3-1b run and reference it as the

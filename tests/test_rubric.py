@@ -18,10 +18,14 @@ from eval.rubric import (
     build_judge_prompt,
     build_pairwise_prompt,
     format_record,
+    judge_key,
     model_family,
     order_flip,
+    pairwise_key,
     parse_pairwise,
     parse_verdict,
+    pending_judge_jobs,
+    pending_pairwise_jobs,
     resolve_pairwise_winner,
     same_family,
 )
@@ -113,10 +117,33 @@ def test_build_judge_prompt_includes_all_record_fields():
 
 
 def test_build_judge_prompt_asks_only_its_own_criterion():
+    user = build_judge_prompt(_RECORD, "news_fidelity")[1]["content"]
+    assert "news" in user.lower()
+    assert "bull and the bear" not in user
+
+
+def test_build_judge_prompt_puts_the_question_after_the_record():
+    """Ordering is a cost decision, not a style one: vLLM can only reuse a shared
+    *prefix*, so the record — the long part — has to come before the criterion or
+    it gets prefilled once per criterion instead of once per record."""
     messages = build_judge_prompt(_RECORD, "news_fidelity")
-    system = messages[0]["content"]
-    assert "news" in system.lower()
-    assert "bull and the bear" not in system
+    user = messages[1]["content"]
+    assert user.index("Trader decision:") < user.index("QUESTION:")
+    # And the response format stays last, where recency keeps it obeyed.
+    assert user.rindex("VERDICT: <yes or no>") > user.index("QUESTION:")
+
+
+def test_all_criteria_for_one_record_share_a_prefix_through_the_record():
+    """The property the prefix cache actually keys on. If a criterion's text ever
+    leaks in front of the record, this fails and the four-prompts-per-record
+    design silently costs 4x the prefill it was measured at."""
+    prompts = [build_judge_prompt(_RECORD, name) for name in CRITERION_NAMES]
+    systems = {tuple(p[0].items()) for p in prompts}
+    assert len(systems) == 1, "system message must be byte-identical per criterion"
+
+    record = format_record(_RECORD)
+    for prompt in prompts:
+        assert prompt[1]["content"].startswith(record)
 
 
 def test_build_judge_prompt_rejects_an_unknown_criterion():
@@ -184,6 +211,15 @@ def test_build_pairwise_prompt_validates_order_and_criterion():
         build_pairwise_prompt(_RECORD, _RECORD_B, "news_fidelity", "ba2")
     with pytest.raises(KeyError):
         build_pairwise_prompt(_RECORD, _RECORD_B, "vibes", "ab")
+
+
+def test_build_pairwise_prompt_puts_the_question_after_both_records():
+    """Same prefix-cache reason as the single-record prompt, with more at stake:
+    the shared span here is two full records."""
+    user = build_pairwise_prompt(_RECORD, _RECORD_B, "news_fidelity", "ab")[1][
+        "content"
+    ]
+    assert user.index("=== RECORD B ===") < user.index("QUESTION:")
 
 
 def test_build_pairwise_prompt_allows_a_tie():
@@ -261,3 +297,74 @@ def test_same_family_is_false_across_families():
 def test_model_family_returns_none_for_an_unrecognised_name():
     assert model_family("some-local-gguf") is None
     assert not same_family("some-local-gguf", "another-local-gguf")
+
+
+# --- work planning ----------------------------------------------------------
+# These two functions decide what a run sends to a GPU, so they are where the
+# money is. Tested here rather than in modal_app.py, which cannot be imported
+# without the Modal SDK.
+
+
+def test_pending_judge_jobs_covers_every_record_and_criterion_when_nothing_stored():
+    jobs = pending_judge_jobs([_RECORD, _RECORD_B], CRITERION_NAMES, set())
+    assert len(jobs) == 2 * len(CRITERION_NAMES)
+
+
+def test_pending_judge_jobs_is_record_major_for_the_prefix_cache():
+    """Consecutive jobs must share a record, or criteria 2-4 miss the KV cache
+    the record's own prefill left behind and the batch costs 4x the prefill."""
+    jobs = pending_judge_jobs([_RECORD, _RECORD_B], CRITERION_NAMES, set())
+    assert [criterion for _, criterion in jobs[: len(CRITERION_NAMES)]] == list(
+        CRITERION_NAMES
+    )
+    assert {id(record) for record, _ in jobs[: len(CRITERION_NAMES)]} == {id(_RECORD)}
+
+
+def test_pending_judge_jobs_skips_what_is_already_judged():
+    """The largest cost lever in normal use: without it, re-running a judge pays
+    a full model load and a full batch to write byte-identical rows."""
+    stored = {judge_key(_RECORD, "news_fidelity")}
+    jobs = pending_judge_jobs([_RECORD, _RECORD_B], CRITERION_NAMES, stored)
+    assert (_RECORD, "news_fidelity") not in jobs
+    assert len(jobs) == 2 * len(CRITERION_NAMES) - 1
+
+
+def test_pending_judge_jobs_treats_a_null_verdict_as_judged():
+    """An unparseable verdict is stored as NULL and still counts as done:
+    sampling is temperature 0 with a fixed seed, so re-asking reproduces the same
+    unparseable answer at full GPU cost. --force is the way to override."""
+    stored = {judge_key(_RECORD, name) for name in CRITERION_NAMES}
+    assert pending_judge_jobs([_RECORD], CRITERION_NAMES, stored) == []
+
+
+def test_pending_judge_jobs_force_re_judges_everything():
+    stored = {judge_key(_RECORD, name) for name in CRITERION_NAMES}
+    jobs = pending_judge_jobs([_RECORD], CRITERION_NAMES, stored, force=True)
+    assert len(jobs) == len(CRITERION_NAMES)
+
+
+def test_judge_key_normalises_a_missing_model_to_empty_string():
+    """A decision saved before the `model` column existed stores NULL, and NULL
+    never equals NULL in a SQLite PK — left as None these rows would look
+    permanently unjudged and be re-judged on every single run."""
+    assert judge_key({**_RECORD, "model": None}, "news_fidelity")[2] == ""
+
+
+def test_pending_pairwise_jobs_groups_criteria_within_a_display_order():
+    """The cacheable prefix is the two records *as displayed*, so the four
+    criteria of one order must be consecutive and the orders must not interleave."""
+    jobs = pending_pairwise_jobs([(_RECORD, _RECORD_B)], CRITERION_NAMES, ORDERS, set())
+    assert len(jobs) == len(CRITERION_NAMES) * len(ORDERS)
+    orders = [order for *_, order in jobs]
+    assert orders == ["ab"] * len(CRITERION_NAMES) + ["ba"] * len(CRITERION_NAMES)
+
+
+def test_pending_pairwise_jobs_skips_stored_comparisons_per_order():
+    """Both orders are separate keys: a comparison judged only one way is not
+    done, because order_flip_rate needs both."""
+    stored = {pairwise_key(_RECORD, _RECORD_B, "news_fidelity", "ab")}
+    jobs = pending_pairwise_jobs(
+        [(_RECORD, _RECORD_B)], CRITERION_NAMES, ORDERS, stored
+    )
+    assert (_RECORD, _RECORD_B, "news_fidelity", "ab") not in jobs
+    assert (_RECORD, _RECORD_B, "news_fidelity", "ba") in jobs

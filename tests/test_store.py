@@ -569,6 +569,97 @@ def test_criterion_verdicts_are_keyed_per_judge():
     assert len(store.fetch_criterion_verdicts(conn)) == 2
 
 
+def test_fetch_judged_keys_returns_only_this_judge_s_work():
+    """Read before a run to skip re-judging. Scoped per judge_model: a second
+    judge has judged nothing just because the first one has."""
+    conn = store.get_connection(":memory:")
+    base = {
+        "ticker": "AAPL",
+        "as_of": "2026-07-24T10:00:00",
+        "model": "gemma-3-1b-it",
+        "criterion": "news_fidelity",
+        "verdict": "yes",
+        "reason": "r",
+        "judged_at": "t",
+    }
+    store.save_criterion_verdicts(conn, [{**base, "judge_model": "judge-1"}])
+
+    assert store.fetch_judged_keys(conn, "judge-1") == {
+        ("AAPL", "2026-07-24T10:00:00", "gemma-3-1b-it", "news_fidelity")
+    }
+    assert store.fetch_judged_keys(conn, "judge-2") == set()
+
+
+def test_fetch_judged_keys_includes_a_null_verdict_row():
+    """An unparseable verdict counts as judged: decoding is greedy with a fixed
+    seed, so re-asking buys the same unparseable answer at full GPU cost."""
+    conn = store.get_connection(":memory:")
+    store.save_criterion_verdicts(
+        conn,
+        [
+            {
+                "ticker": "AAPL",
+                "as_of": "2026-07-24T10:00:00",
+                "model": "gemma-3-1b-it",
+                "judge_model": "judge-1",
+                "criterion": "trader_consistent",
+                "verdict": None,
+                "reason": None,
+                "judged_at": "t",
+            }
+        ],
+    )
+    assert len(store.fetch_judged_keys(conn, "judge-1")) == 1
+
+
+def test_fetch_judged_keys_coalesces_a_null_model_to_empty_string():
+    """Matches rubric.judge_key. A NULL model is unmatchable by value in SQL, so
+    without the COALESCE these rows look unjudged forever and are re-sent every
+    run — the exact waste the skip was added to remove."""
+    conn = store.get_connection(":memory:")
+    store.save_criterion_verdicts(
+        conn,
+        [
+            {
+                "ticker": "AAPL",
+                "as_of": "2026-07-24T10:00:00",
+                "model": None,
+                "judge_model": "judge-1",
+                "criterion": "news_fidelity",
+                "verdict": "yes",
+                "reason": "r",
+                "judged_at": "t",
+            }
+        ],
+    )
+    assert store.fetch_judged_keys(conn, "judge-1") == {
+        ("AAPL", "2026-07-24T10:00:00", "", "news_fidelity")
+    }
+
+
+def test_fetch_pairwise_keys_is_scoped_to_the_model_pair_and_judge():
+    conn = store.get_connection(":memory:")
+    base = {
+        "ticker": "AAPL",
+        "as_of_a": "2026-07-24T10:00:00",
+        "as_of_b": "2026-07-24T14:00:00",
+        "model_a": "model-a",
+        "model_b": "model-b",
+        "criterion": "news_fidelity",
+        "order_shown": "ab",
+        "winner": "model_a",
+        "reason": "r",
+        "judged_at": "t",
+    }
+    store.save_pairwise_results(conn, [{**base, "judge_model": "judge-1"}])
+
+    assert store.fetch_pairwise_keys(conn, "model-a", "model-b", "judge-1") == {
+        ("AAPL", "2026-07-24T10:00:00", "2026-07-24T14:00:00", "news_fidelity", "ab")
+    }
+    assert store.fetch_pairwise_keys(conn, "model-a", "model-b", "judge-2") == set()
+    assert store.fetch_pairwise_keys(conn, "model-a", "model-c", "judge-1") == set()
+
+
 def test_pairwise_results_keep_both_display_orders():
     """order_shown is in the PK: storing only one order throws away the
     order-flip measurement, which is the judge's own noise floor."""
